@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "livetranscription"
+version = "0.1.0"
+description = "Local macOS terminal live transcription + rolling summaries"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+  "openai>=1.0.0",
+  "rich>=13.0.0",
+  "typer>=0.9.0",
+]
+
+[project.scripts]
+livetranscribe = "livetranscription.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
