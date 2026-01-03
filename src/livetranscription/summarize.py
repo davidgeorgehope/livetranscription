@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Optional
 
@@ -30,7 +31,7 @@ def update_running_summary(
     *,
     previous_summary: str,
     new_transcript: str,
-    model: str,
+    model: str = "gemini-3-flash-preview",
     prompt: str = DEFAULT_SUMMARY_PROMPT,
     temperature: float = 0.2,
     max_attempts: int = 3,
@@ -40,33 +41,33 @@ def update_running_summary(
     if max_attempts < 1:
         raise ValueError("max_attempts must be >= 1")
 
-    from openai import OpenAI  # type: ignore
+    import google.generativeai as genai
 
-    client = OpenAI()
-    last_exc: Optional[BaseException] = None
+    genai.configure()  # Uses GOOGLE_API_KEY env var
 
-    messages = [
-        {"role": "system", "content": prompt},
-        {
-            "role": "user",
-            "content": (
-                "Previous summary:\n"
-                f"{previous_summary.strip() or '(none)'}\n\n"
-                "New transcript:\n"
-                f"{new_transcript.strip()}\n\n"
-                "Updated running summary (includes everything so far):"
-            ),
+    gemini_model = genai.GenerativeModel(
+        model,
+        generation_config={
+            "temperature": temperature,
+            "max_output_tokens": 2000,
         },
-    ]
+    )
+
+    full_prompt = (
+        f"{prompt}\n\n"
+        "Previous summary:\n"
+        f"{previous_summary.strip() or '(none)'}\n\n"
+        "New transcript:\n"
+        f"{new_transcript.strip()}\n\n"
+        "Updated running summary (includes everything so far):"
+    )
+
+    last_exc: Optional[BaseException] = None
 
     for attempt in range(1, max_attempts + 1):
         try:
-            resp = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=temperature,
-            )
-            content = resp.choices[0].message.content
+            response = gemini_model.generate_content(full_prompt)
+            content = response.text
             if not content:
                 raise RuntimeError("Empty summary response from model.")
             return content.strip()
@@ -77,3 +78,24 @@ def update_running_summary(
 
     assert last_exc is not None
     raise last_exc
+
+
+async def update_running_summary_async(
+    *,
+    previous_summary: str,
+    new_transcript: str,
+    model: str = "gemini-3-flash-preview",
+    prompt: str = DEFAULT_SUMMARY_PROMPT,
+    temperature: float = 0.2,
+    max_attempts: int = 3,
+) -> str:
+    """Async wrapper for update_running_summary."""
+    return await asyncio.to_thread(
+        update_running_summary,
+        previous_summary=previous_summary,
+        new_transcript=new_transcript,
+        model=model,
+        prompt=prompt,
+        temperature=temperature,
+        max_attempts=max_attempts,
+    )

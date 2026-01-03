@@ -1,10 +1,198 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from enum import Enum
 import json
 from pathlib import Path
 from typing import Any, Optional
+import uuid
+
+
+class MeetingType(str, Enum):
+    """Type of meeting, affects coaching strategy."""
+
+    SALES_CALL = "sales_call"
+    PRODUCT_DEMO = "product_demo"
+    DISCOVERY_CALL = "discovery_call"
+    NEGOTIATION = "negotiation"
+    CUSTOMER_SUCCESS = "customer_success"
+    INTERNAL_MEETING = "internal_meeting"
+    ONE_ON_ONE = "one_on_one"
+
+
+class AlertType(str, Enum):
+    """Type of coaching alert."""
+
+    OBJECTION = "objection"
+    SUGGESTED_QUESTION = "suggested_question"
+    MISSING_TOPIC = "missing_topic"
+    COMPETITOR_MENTION = "competitor_mention"
+    PACE_WARNING = "pace_warning"
+    CUSTOM_REMINDER = "custom_reminder"
+
+
+@dataclass
+class Attendee:
+    """Information about a meeting attendee."""
+
+    name: str
+    role: Optional[str] = None
+    company: Optional[str] = None
+    notes: Optional[str] = None
+
+
+@dataclass
+class TalkingPoint:
+    """A talking point to cover during the meeting."""
+
+    topic: str
+    priority: int = 1  # 1=high, 2=medium, 3=low
+    notes: Optional[str] = None
+    mentioned: bool = False
+    mentioned_at: Optional[str] = None
+
+
+@dataclass
+class MeetingPrepContext:
+    """Pre-meeting context for coaching."""
+
+    meeting_type: MeetingType = MeetingType.SALES_CALL
+    attendees: list[Attendee] = field(default_factory=list)
+    objectives: list[str] = field(default_factory=list)
+    talking_points: list[TalkingPoint] = field(default_factory=list)
+    competitors: list[str] = field(default_factory=list)
+    custom_reminders: list[str] = field(default_factory=list)
+    pricing_notes: Optional[str] = None
+    discount_authority: Optional[str] = None
+    additional_context: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "meeting_type": self.meeting_type.value,
+            "attendees": [asdict(a) for a in self.attendees],
+            "objectives": self.objectives,
+            "talking_points": [asdict(tp) for tp in self.talking_points],
+            "competitors": self.competitors,
+            "custom_reminders": self.custom_reminders,
+            "pricing_notes": self.pricing_notes,
+            "discount_authority": self.discount_authority,
+            "additional_context": self.additional_context,
+        }
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> "MeetingPrepContext":
+        """Create from dictionary."""
+        return MeetingPrepContext(
+            meeting_type=MeetingType(data.get("meeting_type", "sales_call")),
+            attendees=[Attendee(**a) for a in data.get("attendees", [])],
+            objectives=data.get("objectives", []),
+            talking_points=[TalkingPoint(**tp) for tp in data.get("talking_points", [])],
+            competitors=data.get("competitors", []),
+            custom_reminders=data.get("custom_reminders", []),
+            pricing_notes=data.get("pricing_notes"),
+            discount_authority=data.get("discount_authority"),
+            additional_context=data.get("additional_context"),
+        )
+
+
+@dataclass
+class CoachingAlert:
+    """A coaching alert generated during the meeting."""
+
+    id: str
+    alert_type: AlertType
+    content: str
+    suggestion: Optional[str] = None
+    timestamp: str = ""
+    dismissed: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.id:
+            self.id = str(uuid.uuid4())[:8]
+        if not self.timestamp:
+            self.timestamp = datetime.now().isoformat(timespec="seconds")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary for JSON serialization."""
+        return {
+            "id": self.id,
+            "alert_type": self.alert_type.value,
+            "content": self.content,
+            "suggestion": self.suggestion,
+            "timestamp": self.timestamp,
+            "dismissed": self.dismissed,
+            "metadata": self.metadata,
+        }
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> "CoachingAlert":
+        """Create from dictionary."""
+        return CoachingAlert(
+            id=data.get("id", ""),
+            alert_type=AlertType(data.get("alert_type", "suggested_question")),
+            content=data.get("content", ""),
+            suggestion=data.get("suggestion"),
+            timestamp=data.get("timestamp", ""),
+            dismissed=data.get("dismissed", False),
+            metadata=data.get("metadata", {}),
+        )
+
+
+@dataclass
+class TranscriptSegment:
+    """A segment of transcript with speaker attribution."""
+
+    speaker: str
+    text: str
+    start_time: float = 0.0
+    end_time: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "speaker": self.speaker,
+            "text": self.text,
+            "start": self.start_time,
+            "end": self.end_time,
+        }
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> "TranscriptSegment":
+        return TranscriptSegment(
+            speaker=data.get("speaker", "Unknown"),
+            text=data.get("text", ""),
+            start_time=data.get("start", 0.0),
+            end_time=data.get("end", 0.0),
+        )
+
+
+@dataclass
+class TranscriptResult:
+    """Result from transcription with optional diarization."""
+
+    text: str  # Full text for backward compatibility
+    segments: list[TranscriptSegment] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "text": self.text,
+            "segments": [s.to_dict() for s in self.segments],
+        }
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> "TranscriptResult":
+        return TranscriptResult(
+            text=data.get("text", ""),
+            segments=[TranscriptSegment.from_dict(s) for s in data.get("segments", [])],
+        )
+
+    def format_with_speakers(self) -> str:
+        """Format transcript with speaker labels."""
+        if not self.segments:
+            return self.text
+        return "\n".join(f"[{s.speaker}] {s.text}" for s in self.segments)
 
 
 @dataclass
@@ -40,6 +228,8 @@ class SessionPaths:
     summary_md: Path
     state_json: Path
     ffmpeg_log: Path
+    meeting_prep_json: Path
+    coaching_jsonl: Path
 
 
 def resolve_session_paths(session_dir: Path) -> SessionPaths:
@@ -52,6 +242,8 @@ def resolve_session_paths(session_dir: Path) -> SessionPaths:
         summary_md=session_dir / "summary.md",
         state_json=session_dir / "state.json",
         ffmpeg_log=session_dir / "ffmpeg.log",
+        meeting_prep_json=session_dir / "meeting_prep.json",
+        coaching_jsonl=session_dir / "coaching.jsonl",
     )
 
 
@@ -118,4 +310,105 @@ def load_transcript_since(paths: SessionPaths, *, after_index: int) -> list[tupl
             out.append((idx, text))
     out.sort(key=lambda t: t[0])
     return out
+
+
+def load_full_transcript(paths: SessionPaths) -> str:
+    """Load the full transcript text."""
+    if not paths.transcript_txt.exists():
+        return ""
+    return paths.transcript_txt.read_text(encoding="utf-8")
+
+
+# ----- Meeting Prep Persistence -----
+
+
+def save_meeting_prep(paths: SessionPaths, prep: MeetingPrepContext) -> None:
+    """Save meeting prep context to JSON file."""
+    paths.meeting_prep_json.write_text(
+        json.dumps(prep.to_dict(), indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def load_meeting_prep(paths: SessionPaths) -> Optional[MeetingPrepContext]:
+    """Load meeting prep context from JSON file."""
+    if not paths.meeting_prep_json.exists():
+        return None
+    try:
+        data = json.loads(paths.meeting_prep_json.read_text(encoding="utf-8"))
+        return MeetingPrepContext.from_dict(data)
+    except (json.JSONDecodeError, KeyError, ValueError):
+        return None
+
+
+def update_talking_point_mentioned(
+    paths: SessionPaths, topic: str, mentioned_at: Optional[str] = None
+) -> None:
+    """Mark a talking point as mentioned in the meeting prep."""
+    prep = load_meeting_prep(paths)
+    if prep is None:
+        return
+
+    if mentioned_at is None:
+        mentioned_at = datetime.now().isoformat(timespec="seconds")
+
+    for tp in prep.talking_points:
+        if tp.topic.lower() == topic.lower() and not tp.mentioned:
+            tp.mentioned = True
+            tp.mentioned_at = mentioned_at
+            break
+
+    save_meeting_prep(paths, prep)
+
+
+# ----- Coaching Alert Persistence -----
+
+
+def append_coaching_alert(paths: SessionPaths, alert: CoachingAlert) -> None:
+    """Append a coaching alert to the JSONL file."""
+    with paths.coaching_jsonl.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(alert.to_dict(), ensure_ascii=False) + "\n")
+
+
+def load_coaching_alerts(paths: SessionPaths) -> list[CoachingAlert]:
+    """Load all coaching alerts from the JSONL file."""
+    if not paths.coaching_jsonl.exists():
+        return []
+
+    alerts: list[CoachingAlert] = []
+    for line in paths.coaching_jsonl.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+            alerts.append(CoachingAlert.from_dict(data))
+        except (json.JSONDecodeError, KeyError, ValueError):
+            continue
+
+    return alerts
+
+
+def dismiss_coaching_alert(paths: SessionPaths, alert_id: str) -> bool:
+    """
+    Mark a coaching alert as dismissed.
+
+    Returns True if the alert was found and updated.
+    """
+    alerts = load_coaching_alerts(paths)
+    found = False
+
+    for alert in alerts:
+        if alert.id == alert_id:
+            alert.dismissed = True
+            found = True
+            break
+
+    if found:
+        # Rewrite the entire file with updated alerts
+        with paths.coaching_jsonl.open("w", encoding="utf-8") as f:
+            for alert in alerts:
+                f.write(json.dumps(alert.to_dict(), ensure_ascii=False) + "\n")
+
+    return found
 

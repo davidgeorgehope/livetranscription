@@ -35,7 +35,7 @@ from livetranscription.session_store import (
     write_summary,
 )
 from livetranscription.summarize import update_running_summary
-from livetranscription.transcribe import transcribe_file_whisper
+from livetranscription.transcribe import transcribe_file_gemini
 
 app = typer.Typer(add_completion=False, help="Local live transcription (macOS).")
 console = Console()
@@ -76,8 +76,9 @@ def run(
     out_dir: Optional[Path] = typer.Option(None, help="Session output folder."),
     keep_audio: bool = typer.Option(False, help="Keep audio chunk files."),
     language: Optional[str] = typer.Option(None, help="Optional language hint (e.g., 'en')."),
-    model: str = typer.Option("whisper-1", help="Transcription model."),
-    summary_model: str = typer.Option("gpt-4o-mini", help="Model for summaries."),
+    model: str = typer.Option("gemini-3-pro-preview", help="Gemini model for transcription."),
+    summary_model: str = typer.Option("gemini-3-flash-preview", help="Gemini model for summaries."),
+    no_diarize: bool = typer.Option(False, help="Disable speaker diarization."),
 ) -> None:
     """Record, transcribe chunks, and write rolling summaries."""
     session_dir = out_dir
@@ -161,25 +162,35 @@ def run(
         console.print(f"Transcribing chunk {chunk_index} ({offset}s)…")
 
         try:
-            text = transcribe_file_whisper(chunk_path, model=model, language=language)
+            result = transcribe_file_gemini(
+                chunk_path,
+                model=model,
+                language=language,
+                diarize=not no_diarize,
+            )
+            text = result.text
             if not text.strip():
                 text = "(silence)"
 
-            append_transcript_text(paths, chunk_index=chunk_index, chunk_seconds=chunk_seconds, text=text)
+            # Format with speaker labels if we have segments
+            display_text = result.format_with_speakers() if result.segments else text
+
+            append_transcript_text(paths, chunk_index=chunk_index, chunk_seconds=chunk_seconds, text=display_text)
             append_jsonl(
                 paths,
                 {
                     "index": chunk_index,
                     "chunk_file": str(chunk_path.relative_to(paths.session_dir)),
                     "text": text,
+                    "segments": [s.to_dict() for s in result.segments],
                     "model": model,
                     "language": language,
                     "recorded_at": datetime.now().isoformat(timespec="seconds"),
                 },
             )
-            console.print(text)
+            console.print(display_text)
 
-            pending_for_summary.append(text)
+            pending_for_summary.append(display_text)
             state.last_processed_index = chunk_index
             last_processed_index = chunk_index
             save_state(paths, state)
@@ -244,6 +255,28 @@ def run(
             process_chunk(chunk.index, chunk.path)
 
         maybe_update_summary(force=True)
+
+
+@app.command()
+def web(
+    host: str = typer.Option("127.0.0.1", help="Host to bind to."),
+    port: int = typer.Option(8765, help="Port to bind to."),
+    static_dir: Optional[Path] = typer.Option(None, help="Directory with frontend static files."),
+) -> None:
+    """Start the web server with real-time coaching UI."""
+    from livetranscription.server import run_server
+
+    console.print(f"Starting web server at [bold]http://{host}:{port}[/bold]")
+    console.print("Press Ctrl+C to stop.")
+
+    if static_dir and not static_dir.exists():
+        console.print(f"[yellow]Warning:[/yellow] Static directory {static_dir} does not exist.")
+        static_dir = None
+
+    try:
+        run_server(host=host, port=port, static_dir=static_dir)
+    except KeyboardInterrupt:
+        console.print("\nShutting down…")
 
 
 def main() -> None:
