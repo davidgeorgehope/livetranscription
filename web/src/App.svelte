@@ -4,6 +4,7 @@
   import Transcript from './components/Transcript.svelte';
   import CoachingPanel from './components/CoachingPanel.svelte';
   import SessionControls from './components/SessionControls.svelte';
+  import SessionList from './components/SessionList.svelte';
   import { WebSocketManager, startPing } from './lib/websocket.js';
   import * as api from './lib/api.js';
   import {
@@ -21,6 +22,7 @@
     resetSession,
   } from './lib/stores.js';
 
+  let activeTab = 'current'; // 'current' | 'sessions'
   let view = 'prep'; // 'prep' | 'session'
   let selectedDevices = [];
   let wsManager = null;
@@ -166,15 +168,82 @@
   function handleNewSessionClick() {
     resetSession();
     view = 'prep';
+    activeTab = 'current';
     handleNewSession();
+  }
+
+  async function handleSessionSelect(event) {
+    const session = event.detail;
+    loading = true;
+    try {
+      // Load session details
+      const fullSession = await api.getSession(session.id);
+      currentSession.set(fullSession);
+
+      // Load transcript
+      const transcript = await api.getTranscript(session.id);
+      transcriptChunks.set(transcript.chunks);
+
+      // Load summary
+      const summaryData = await api.getSummary(session.id);
+      currentSummary.set(summaryData.summary);
+
+      // Load meeting prep if exists
+      try {
+        const prep = await api.getMeetingPrep(session.id);
+        meetingPrep.set(prep);
+      } catch (e) {
+        // No meeting prep for this session
+        meetingPrep.set(null);
+      }
+
+      // Load coaching history
+      try {
+        const coaching = await api.getCoachingHistory(session.id);
+        coachingAlerts.set(coaching.alerts);
+      } catch (e) {
+        coachingAlerts.set([]);
+      }
+
+      sessionStatus.set(fullSession.status);
+      view = 'session';
+      activeTab = 'current';
+
+      // Connect WebSocket if session is active (recording)
+      if (fullSession.status === 'recording') {
+        connectWebSocket(session.id);
+      }
+    } catch (e) {
+      console.error('Failed to load session:', e);
+      lastError.set(e.message);
+    } finally {
+      loading = false;
+    }
   }
 </script>
 
 <div class="app">
   <header class="app-header">
     <h1>Live Transcription Coach</h1>
+    <nav class="tabs">
+      <button
+        class="tab"
+        class:active={activeTab === 'current'}
+        on:click={() => activeTab = 'current'}
+      >
+        Current
+      </button>
+      <button
+        class="tab"
+        class:active={activeTab === 'sessions'}
+        on:click={() => activeTab = 'sessions'}
+      >
+        Sessions
+      </button>
+    </nav>
   </header>
 
+  {#if activeTab === 'current'}
   <SessionControls
     bind:selectedDevices
     on:start={handleStart}
@@ -219,6 +288,11 @@
       </div>
     {/if}
   </main>
+  {:else}
+  <main class="app-main">
+    <SessionList on:select={handleSessionSelect} />
+  </main>
+  {/if}
 
   {#if loading}
     <div class="loading-overlay">
@@ -236,6 +310,9 @@
   }
 
   .app-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     padding: 0.75rem 1rem;
     background: var(--color-surface-elevated);
     border-bottom: 1px solid var(--color-border);
@@ -245,6 +322,34 @@
     margin: 0;
     font-size: 1.125rem;
     font-weight: 600;
+  }
+
+  .tabs {
+    display: flex;
+    gap: 0.25rem;
+  }
+
+  .tab {
+    padding: 0.375rem 0.75rem;
+    font-size: 0.75rem;
+    font-weight: 500;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 0.375rem;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+
+  .tab:hover {
+    color: var(--color-text);
+    background: var(--color-surface);
+  }
+
+  .tab.active {
+    background: var(--color-primary);
+    color: white;
+    border-color: var(--color-primary);
   }
 
   .error-banner {
