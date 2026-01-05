@@ -81,7 +81,7 @@ class MeetingPrepCreate(BaseModel):
 class SessionCreate(BaseModel):
     """Request model for creating a new session."""
 
-    device_index: int
+    device_index: str  # Can be single index "0" or comma-separated "0,1" for mixing
     chunk_seconds: int = 30
     summary_minutes: int = 5
     language: Optional[str] = None
@@ -91,7 +91,7 @@ class SessionCreate(BaseModel):
 class SessionStartRequest(BaseModel):
     """Request model for starting a session."""
 
-    device_index: Optional[int] = None  # Override if different from creation
+    device_index: Optional[str] = None  # Override if different from creation
 
 
 # ----- Response Models -----

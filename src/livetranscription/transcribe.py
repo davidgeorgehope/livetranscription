@@ -29,18 +29,21 @@ Return your response as valid JSON with this exact format:
 }
 
 Instructions:
-- Transcribe ALL spoken words exactly as said
+- Transcribe ONLY words that are actually spoken in this audio
+- NEVER invent, imagine, or hallucinate speech that isn't there
+- If the audio contains silence, background noise, music, or no clear speech, return: {"text": "(silence)", "segments": []}
 - Identify distinct speakers and label them consistently (Speaker 1, Speaker 2, etc.)
 - If only one speaker, still include segments with "Speaker 1"
 - Estimate start/end times in seconds relative to the audio start
-- If the audio is silent or contains no speech, return: {"text": "(silence)", "segments": []}
-- Return ONLY valid JSON, no other text or markdown"""
+- Return ONLY valid JSON, no other text or markdown
+
+CRITICAL: Only transcribe actual human speech you can clearly hear. When in doubt, return silence."""
 
 
 def transcribe_file_gemini(
     path: Path,
     *,
-    model: str = "gemini-3-pro-preview",
+    model: str = "gemini-3-flash-preview",
     language: Optional[str] = None,
     diarize: bool = True,
     max_attempts: int = 3,
@@ -61,18 +64,10 @@ def transcribe_file_gemini(
     if max_attempts < 1:
         raise ValueError("max_attempts must be >= 1")
 
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types
 
-    genai.configure()  # Uses GOOGLE_API_KEY env var
-
-    gemini_model = genai.GenerativeModel(
-        model,
-        generation_config={
-            "temperature": 0.1,  # Low temperature for accuracy
-            "max_output_tokens": 4000,
-            "response_mime_type": "application/json",
-        },
-    )
+    client = genai.Client()  # Uses GEMINI_API_KEY env var
 
     # Read audio file as bytes
     audio_bytes = path.read_bytes()
@@ -103,10 +98,18 @@ def transcribe_file_gemini(
 
     for attempt in range(1, max_attempts + 1):
         try:
-            response = gemini_model.generate_content([
-                prompt,
-                {"mime_type": mime_type, "data": audio_bytes},
-            ])
+            response = client.models.generate_content(
+                model=model,
+                contents=[
+                    prompt,
+                    types.Part.from_bytes(data=audio_bytes, mime_type=mime_type),
+                ],
+                config=types.GenerateContentConfig(
+                    temperature=0.1,  # Low temperature for accuracy
+                    max_output_tokens=4000,
+                    response_mime_type="application/json",
+                ),
+            )
 
             content = response.text
             if not content:
@@ -156,7 +159,7 @@ def _parse_transcript_response(content: str) -> TranscriptResult:
 async def transcribe_file_gemini_async(
     path: Path,
     *,
-    model: str = "gemini-3-pro-preview",
+    model: str = "gemini-3-flash-preview",
     language: Optional[str] = None,
     diarize: bool = True,
     max_attempts: int = 3,
@@ -176,7 +179,7 @@ async def transcribe_file_gemini_async(
 def transcribe_file_whisper(
     path: Path,
     *,
-    model: str = "gemini-3-pro-preview",
+    model: str = "gemini-3-flash-preview",
     language: Optional[str] = None,
     max_attempts: int = 3,
 ) -> str:
@@ -198,7 +201,7 @@ def transcribe_file_whisper(
 async def transcribe_file_whisper_async(
     path: Path,
     *,
-    model: str = "gemini-3-pro-preview",
+    model: str = "gemini-3-flash-preview",
     language: Optional[str] = None,
     max_attempts: int = 3,
 ) -> str:

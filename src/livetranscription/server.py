@@ -70,7 +70,7 @@ class ActiveSession:
         session_id: str,
         paths: SessionPaths,
         state: SessionState,
-        device_index: int,
+        device_index: str,  # Can be "0" or "0,1" for mixing multiple devices
     ):
         self.session_id = session_id
         self.paths = paths
@@ -84,7 +84,7 @@ class ActiveSession:
         self.summary_minutes: int = 5
         self.keep_audio: bool = False
         self.language: Optional[str] = None
-        self.transcribe_model: str = "gemini-3-pro-preview"
+        self.transcribe_model: str = "gemini-3-flash-preview"
         self.coaching_model: str = "gemini-3-flash-preview"
 
 
@@ -174,7 +174,7 @@ def list_devices():
         raise HTTPException(status_code=500, detail=f"Failed to list devices: {e}")
 
     device_list = [
-        DeviceInfo(index=d["index"], name=d["name"], type=d["type"]) for d in devices
+        DeviceInfo(index=d.index, name=d.name, type=d.kind) for d in devices
     ]
 
     return DeviceListResponse(devices=device_list)
@@ -401,10 +401,10 @@ async def start_session(session_id: str):
     # Start ffmpeg
     try:
         ffmpeg_proc = start_ffmpeg_segmenter(
-            device_index=active.device_index,
+            device=active.device_index,
             chunk_seconds=active.state.chunk_seconds,
-            out_dir=active.paths.chunks_dir,
-            log_path=active.paths.ffmpeg_log,
+            output_pattern=active.paths.chunks_dir / "out%05d.wav",
+            stderr_path=active.paths.ffmpeg_log,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to start recording: {e}")
@@ -467,22 +467,22 @@ async def _process_chunks(active: ActiveSession) -> None:
     while active.status == SessionStatus.RECORDING:
         try:
             # Look for next chunk
-            chunk_path = find_next_completed_chunk(
+            chunk = find_next_completed_chunk(
                 active.paths.chunks_dir,
-                active.state.last_processed_index,
+                after_index=active.state.last_processed_index,
             )
 
-            if chunk_path is None:
+            if chunk is None:
                 await asyncio.sleep(0.5)
                 continue
 
             # Wait for file to be stable
-            await asyncio.to_thread(wait_for_file_stable, chunk_path)
+            await asyncio.to_thread(wait_for_file_stable, chunk.path)
 
             # Transcribe with Gemini (includes diarization)
             transcript_result = await asyncio.to_thread(
                 transcribe_file_gemini,
-                chunk_path,
+                chunk.path,
                 model=active.transcribe_model,
                 language=active.language,
                 diarize=True,
@@ -491,8 +491,8 @@ async def _process_chunks(active: ActiveSession) -> None:
             text = transcript_result.text
             segments = transcript_result.segments
 
-            # Get chunk index from filename
-            chunk_index = int(chunk_path.stem.replace("out", ""))
+            # Get chunk index from the ChunkFile
+            chunk_index = chunk.index
 
             # Persist transcript (with speaker labels if available)
             if segments:
@@ -513,7 +513,7 @@ async def _process_chunks(active: ActiveSession) -> None:
                 active.paths,
                 {
                     "index": chunk_index,
-                    "chunk_file": str(chunk_path.name),
+                    "chunk_file": str(chunk.path.name),
                     "text": text,
                     "segments": [s.to_dict() for s in segments],
                     "model": active.transcribe_model,
@@ -580,7 +580,7 @@ async def _process_chunks(active: ActiveSession) -> None:
 
             # Clean up audio file if not keeping
             if not active.keep_audio:
-                chunk_path.unlink(missing_ok=True)
+                chunk.path.unlink(missing_ok=True)
 
         except asyncio.CancelledError:
             break

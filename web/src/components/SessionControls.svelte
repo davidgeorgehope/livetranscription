@@ -4,11 +4,24 @@
 
   const dispatch = createEventDispatcher();
 
-  export let selectedDevice = null;
+  export let selectedDevices = [];
 
   $: isRecording = $sessionStatus === 'recording';
-  $: canStart = $currentSession && !isRecording && selectedDevice !== null;
+  $: canStart = $currentSession && !isRecording && selectedDevices.length > 0;
   $: canStop = isRecording;
+
+  function toggleDevice(index) {
+    if (isRecording) return;
+    if (selectedDevices.includes(index)) {
+      selectedDevices = selectedDevices.filter(d => d !== index);
+    } else {
+      selectedDevices = [...selectedDevices, index];
+    }
+  }
+
+  function isSelected(index) {
+    return selectedDevices.includes(index);
+  }
 
   function handleStart() {
     dispatch('start');
@@ -60,13 +73,24 @@
     </div>
 
     <div class="device-select">
-      <label for="device-select" class="sr-only">Audio Device</label>
-      <select id="device-select" bind:value={selectedDevice} disabled={isRecording}>
-        <option value={null}>Select audio device...</option>
-        {#each $audioDevices as device}
-          <option value={device.index}>{device.name}</option>
-        {/each}
-      </select>
+      <span class="device-label">Audio ({$audioDevices.length}):</span>
+      <div class="device-chips">
+        {#if $audioDevices.length === 0}
+          <span class="no-devices">Loading devices...</span>
+        {:else}
+          {#each $audioDevices as device}
+            <button
+              type="button"
+              class="device-chip"
+              class:selected={selectedDevices.includes(device.index)}
+              disabled={isRecording}
+              on:click={() => toggleDevice(device.index)}
+            >
+              {device.name}
+            </button>
+          {/each}
+        {/if}
+      </div>
     </div>
 
     <div class="control-buttons">
@@ -170,13 +194,58 @@
 
   .device-select {
     flex: 1;
-    max-width: 300px;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    overflow-x: auto;
   }
 
-  .device-select select {
-    width: 100%;
-    padding: 0.375rem 0.75rem;
-    font-size: 0.875rem;
+  .device-label {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+  }
+
+  .device-chips {
+    display: flex;
+    gap: 0.375rem;
+    flex-wrap: wrap;
+  }
+
+  .device-chip {
+    padding: 0.25rem 0.5rem;
+    font-size: 0.75rem;
+    border: 1px solid var(--color-border);
+    border-radius: 1rem;
+    background: var(--color-surface);
+    color: var(--color-text-muted);
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+    pointer-events: auto;
+    user-select: none;
+  }
+
+  .device-chip:hover:not(:disabled) {
+    border-color: var(--color-primary);
+    color: var(--color-text);
+  }
+
+  .device-chip.selected {
+    background: var(--color-primary);
+    border-color: var(--color-primary);
+    color: white;
+  }
+
+  .device-chip:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .no-devices {
+    font-size: 0.75rem;
+    color: var(--color-text-muted);
+    font-style: italic;
   }
 
   .control-buttons {

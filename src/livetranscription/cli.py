@@ -76,7 +76,7 @@ def run(
     out_dir: Optional[Path] = typer.Option(None, help="Session output folder."),
     keep_audio: bool = typer.Option(False, help="Keep audio chunk files."),
     language: Optional[str] = typer.Option(None, help="Optional language hint (e.g., 'en')."),
-    model: str = typer.Option("gemini-3-pro-preview", help="Gemini model for transcription."),
+    model: str = typer.Option("gemini-3-flash-preview", help="Gemini model for transcription."),
     summary_model: str = typer.Option("gemini-3-flash-preview", help="Gemini model for summaries."),
     no_diarize: bool = typer.Option(False, help="Disable speaker diarization."),
 ) -> None:

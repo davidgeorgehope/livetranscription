@@ -41,17 +41,10 @@ def update_running_summary(
     if max_attempts < 1:
         raise ValueError("max_attempts must be >= 1")
 
-    import google.generativeai as genai
+    from google import genai
+    from google.genai import types
 
-    genai.configure()  # Uses GOOGLE_API_KEY env var
-
-    gemini_model = genai.GenerativeModel(
-        model,
-        generation_config={
-            "temperature": temperature,
-            "max_output_tokens": 2000,
-        },
-    )
+    client = genai.Client()  # Uses GEMINI_API_KEY env var
 
     full_prompt = (
         f"{prompt}\n\n"
@@ -66,7 +59,14 @@ def update_running_summary(
 
     for attempt in range(1, max_attempts + 1):
         try:
-            response = gemini_model.generate_content(full_prompt)
+            response = client.models.generate_content(
+                model=model,
+                contents=full_prompt,
+                config=types.GenerateContentConfig(
+                    temperature=temperature,
+                    max_output_tokens=2000,
+                ),
+            )
             content = response.text
             if not content:
                 raise RuntimeError("Empty summary response from model.")

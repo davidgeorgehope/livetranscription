@@ -22,7 +22,7 @@
   } from './lib/stores.js';
 
   let view = 'prep'; // 'prep' | 'session'
-  let selectedDevice = null;
+  let selectedDevices = [];
   let wsManager = null;
   let stopPing = null;
   let loading = false;
@@ -47,15 +47,17 @@
   }
 
   async function handleNewSession() {
-    if (!selectedDevice) {
-      lastError.set('Please select an audio device');
+    if (selectedDevices.length === 0) {
+      lastError.set('Please select at least one audio device');
       return;
     }
 
     loading = true;
     try {
+      // Join device indices as comma-separated string for mixing
+      const deviceString = selectedDevices.join(',');
       const session = await api.createSession({
-        device_index: selectedDevice,
+        device_index: deviceString,
         chunk_seconds: 30,
         summary_minutes: 5,
       });
@@ -174,7 +176,7 @@
   </header>
 
   <SessionControls
-    bind:selectedDevice
+    bind:selectedDevices
     on:start={handleStart}
     on:stop={handleStop}
     on:new={handleNewSessionClick}

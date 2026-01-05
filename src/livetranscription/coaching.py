@@ -259,20 +259,12 @@ class CoachingEngine:
 
         return result
 
-    def _get_gemini_model(self):
-        """Get or create the Gemini model instance."""
+    def _get_gemini_client(self):
+        """Get or create the Gemini client instance."""
         if self._gemini_model is None:
-            import google.generativeai as genai
+            from google import genai
 
-            genai.configure()  # Uses GOOGLE_API_KEY env var
-            self._gemini_model = genai.GenerativeModel(
-                self.model,
-                generation_config={
-                    "temperature": 0.3,
-                    "max_output_tokens": 1000,
-                    "response_mime_type": "application/json",
-                },
-            )
+            self._gemini_model = genai.Client()  # Uses GEMINI_API_KEY env var
         return self._gemini_model
 
     async def _analyze_with_llm(
@@ -308,10 +300,18 @@ class CoachingEngine:
         full_prompt = "You are a real-time meeting coach. Return only valid JSON.\n\n" + prompt
 
         # Call Gemini
-        model = self._get_gemini_model()
+        from google.genai import types
+
+        client = self._get_gemini_client()
         response = await asyncio.to_thread(
-            model.generate_content,
-            full_prompt,
+            client.models.generate_content,
+            model=self.model,
+            contents=full_prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.3,
+                max_output_tokens=1000,
+                response_mime_type="application/json",
+            ),
         )
 
         content = response.text
