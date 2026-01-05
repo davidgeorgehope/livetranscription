@@ -102,6 +102,7 @@
   }
 </script>
 
+<div class="meeting-prep-wrapper">
 <div class="meeting-prep">
   <h2>Meeting Prep</h2>
   <p class="subtitle">Enter context about your meeting to get personalized coaching.</p>
@@ -223,12 +224,19 @@
     </div>
   </form>
 </div>
+</div>
 
 <style>
+  .meeting-prep-wrapper {
+    height: 100%;
+    overflow-y: auto;
+    padding: 1rem;
+  }
+
   .meeting-prep {
     max-width: 600px;
     margin: 0 auto;
-    padding: 2rem;
+    padding: 1rem;
   }
 
   h2 {

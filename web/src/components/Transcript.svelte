@@ -165,6 +165,9 @@
     padding: 1rem;
     background: rgba(6, 182, 212, 0.1);
     border-bottom: 1px solid var(--color-border);
+    max-height: 40%;
+    overflow-y: auto;
+    flex-shrink: 0;
   }
 
   .summary-header {
