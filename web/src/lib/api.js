@@ -79,3 +79,11 @@ export async function getSummary(sessionId) {
 export async function getCoachingHistory(sessionId) {
   return request(`/sessions/${sessionId}/coaching`);
 }
+
+// Chat endpoint
+export async function sendChatMessage(sessionId, message, history = []) {
+  return request(`/sessions/${sessionId}/chat`, {
+    method: 'POST',
+    body: JSON.stringify({ message, history }),
+  });
+}

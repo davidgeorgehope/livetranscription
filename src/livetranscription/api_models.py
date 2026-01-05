@@ -130,6 +130,15 @@ class MeetingPrepResponse(BaseModel):
     additional_context: Optional[str] = None
 
 
+class TranscriptSegment(BaseModel):
+    """A segment of transcript with speaker attribution."""
+
+    speaker: str
+    text: str
+    start: float = 0.0
+    end: float = 0.0
+
+
 class TranscriptChunk(BaseModel):
     """A single transcript chunk."""
 
@@ -137,6 +146,7 @@ class TranscriptChunk(BaseModel):
     text: str
     timestamp: str  # HH:MM:SS format
     recorded_at: datetime
+    segments: list[TranscriptSegment] = Field(default_factory=list)
 
 
 class CoachingAlertResponse(BaseModel):

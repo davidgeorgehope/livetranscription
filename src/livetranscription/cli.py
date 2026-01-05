@@ -100,7 +100,7 @@ def run(
             )
         chunk_seconds = state.chunk_seconds
 
-    pending_for_summary = [text for _, text in load_transcript_since(paths, after_index=state.last_summarized_index)]
+    pending_for_summary = [chunk.text for chunk in load_transcript_since(paths, after_index=state.last_summarized_index)]
 
     max_existing_chunk = max_chunk_index(paths.chunks_dir)
     segment_start_number = max(max_existing_chunk, state.last_processed_index) + 1

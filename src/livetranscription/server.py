@@ -17,6 +17,7 @@ from typing import Any, Optional
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from .api_models import (
     CoachingHistoryResponse,
@@ -125,7 +126,14 @@ app.add_middleware(
 
 def get_sessions_dir() -> Path:
     """Get the sessions directory."""
-    return Path.cwd() / "sessions"
+    # First check relative to cwd, then relative to package
+    cwd_sessions = Path.cwd() / "sessions"
+    if cwd_sessions.exists():
+        return cwd_sessions
+
+    # Fall back to project root (two levels up from this file)
+    package_dir = Path(__file__).parent.parent.parent
+    return package_dir / "sessions"
 
 
 def get_session_by_id(session_id: str) -> tuple[SessionPaths, SessionState]:
@@ -601,7 +609,7 @@ async def _run_summary(active: ActiveSession, force: bool = False) -> None:
     if not chunks and not force:
         return
 
-    new_text = "\n".join(text for _, text in chunks)
+    new_text = "\n".join(chunk.text for chunk in chunks)
 
     # Run summary
     try:
@@ -654,15 +662,25 @@ def get_transcript(session_id: str):
     chunks_data = load_transcript_since(paths, after_index=-1)
 
     from .session_store import format_hhmmss
+    from .api_models import TranscriptSegment as APITranscriptSegment
 
     chunks = [
         TranscriptChunk(
-            index=idx,
-            text=text,
-            timestamp=format_hhmmss(idx * state.chunk_seconds),
-            recorded_at=datetime.now(),  # Placeholder - ideally from JSONL
+            index=chunk.index,
+            text=chunk.text,
+            timestamp=format_hhmmss(chunk.index * state.chunk_seconds),
+            recorded_at=datetime.fromisoformat(chunk.recorded_at) if chunk.recorded_at else datetime.now(),
+            segments=[
+                APITranscriptSegment(
+                    speaker=seg.speaker,
+                    text=seg.text,
+                    start=seg.start_time,
+                    end=seg.end_time,
+                )
+                for seg in chunk.segments
+            ],
         )
-        for idx, text in chunks_data
+        for chunk in chunks_data
     ]
 
     return TranscriptResponse(
@@ -707,6 +725,86 @@ def get_coaching_history(session_id: str):
             for a in alerts
         ],
     )
+
+
+# ----- Chat Endpoint -----
+
+
+class ChatMessageHistory(BaseModel):
+    """A single message in the chat history."""
+
+    role: str  # 'user' or 'assistant'
+    content: str
+
+
+class ChatRequest(BaseModel):
+    """Request model for chat messages."""
+
+    message: str
+    history: list[ChatMessageHistory] = Field(default_factory=list)
+
+
+class ChatResponse(BaseModel):
+    """Response model for chat messages."""
+
+    response: str
+
+
+@app.post("/api/sessions/{session_id}/chat", response_model=ChatResponse)
+async def chat_with_session(session_id: str, request: ChatRequest):
+    """Chat about the session's conversation content."""
+    paths, state = get_session_by_id(session_id)
+
+    # Load the full transcript
+    full_transcript = load_full_transcript(paths)
+    if not full_transcript.strip():
+        return ChatResponse(response="No transcript available yet. Start recording first.")
+
+    # Load summary if available
+    summary = state.summary or ""
+
+    # Build context for the AI
+    system_context = f"""You are a helpful assistant that answers questions about a conversation/meeting transcript.
+
+Here is the transcript of the conversation:
+
+{full_transcript}
+
+{f"Here is a summary of the conversation so far:{chr(10)}{summary}" if summary else ""}
+
+Answer the user's question based on the transcript content. Be concise and factual. If something wasn't discussed in the transcript, say so.
+"""
+
+    # Build conversation with history
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client()
+
+    # Build messages
+    messages = [{"role": "user", "parts": [{"text": system_context + "\n\nUser: " + request.message}]}]
+
+    # Add conversation history context if present
+    if request.history:
+        history_text = "\n".join([f"{'User' if m.role == 'user' else 'Assistant'}: {m.content}" for m in request.history[-5:]])
+        messages = [{"role": "user", "parts": [{"text": system_context + f"\n\nPrevious conversation:\n{history_text}\n\nUser: {request.message}"}]}]
+
+    try:
+        response = await asyncio.to_thread(
+            lambda: client.models.generate_content(
+                model="gemini-3-pro-preview",
+                contents=messages,
+                config=types.GenerateContentConfig(
+                    thinking_config=types.ThinkingConfig(thinkingBudget=8192),
+                    max_output_tokens=2000,
+                ),
+            )
+        )
+
+        return ChatResponse(response=response.text or "Sorry, I couldn't generate a response.")
+    except Exception as e:
+        print(f"[server] Chat error: {e}")
+        return ChatResponse(response=f"Error: {str(e)}")
 
 
 # ----- WebSocket Endpoint -----

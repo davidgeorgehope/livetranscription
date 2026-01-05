@@ -41,6 +41,10 @@ export const wsConnected = writable(false);
 // Error state
 export const lastError = writable(null);
 
+// Chat messages for conversation Q&A
+// Each message has: { role: 'user' | 'assistant', content: string, timestamp: string }
+export const chatMessages = writable([]);
+
 // Helper functions
 export function addTranscriptChunk(chunk) {
   transcriptChunks.update((chunks) => [...chunks, chunk]);
@@ -70,6 +74,17 @@ export function updateTalkingPointMentioned(topic) {
   });
 }
 
+export function addChatMessage(message) {
+  chatMessages.update((messages) => [...messages, {
+    ...message,
+    timestamp: new Date().toISOString(),
+  }]);
+}
+
+export function clearChatMessages() {
+  chatMessages.set([]);
+}
+
 export function resetSession() {
   currentSession.set(null);
   sessionStatus.set('disconnected');
@@ -79,4 +94,5 @@ export function resetSession() {
   meetingPrep.set(null);
   wsConnected.set(false);
   lastError.set(null);
+  chatMessages.set([]);
 }

@@ -5,6 +5,7 @@
   import CoachingPanel from './components/CoachingPanel.svelte';
   import SessionControls from './components/SessionControls.svelte';
   import SessionList from './components/SessionList.svelte';
+  import ChatPanel from './components/ChatPanel.svelte';
   import { WebSocketManager, startPing } from './lib/websocket.js';
   import * as api from './lib/api.js';
   import {
@@ -22,7 +23,7 @@
     resetSession,
   } from './lib/stores.js';
 
-  let activeTab = 'current'; // 'current' | 'sessions'
+  let activeTab = 'current'; // 'current' | 'sessions' | 'chat'
   let view = 'prep'; // 'prep' | 'session'
   let selectedDevices = [];
   let wsManager = null;
@@ -240,6 +241,13 @@
       >
         Sessions
       </button>
+      <button
+        class="tab"
+        class:active={activeTab === 'chat'}
+        on:click={() => activeTab = 'chat'}
+      >
+        Chat
+      </button>
     </nav>
   </header>
 
@@ -288,9 +296,13 @@
       </div>
     {/if}
   </main>
-  {:else}
+  {:else if activeTab === 'sessions'}
   <main class="app-main">
     <SessionList on:select={handleSessionSelect} />
+  </main>
+  {:else if activeTab === 'chat'}
+  <main class="app-main chat-main">
+    <ChatPanel />
   </main>
   {/if}
 
@@ -428,6 +440,12 @@
     background: var(--color-bg);
     padding: 1rem;
     overflow: hidden;
+  }
+
+  .chat-main {
+    padding: 1rem;
+    max-width: 800px;
+    margin: 0 auto;
   }
 
   .loading-overlay {

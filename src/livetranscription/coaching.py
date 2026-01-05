@@ -38,7 +38,7 @@ from .session_store import (
 
 
 # Coaching prompt template - single batched call for efficiency
-COACHING_PROMPT = """You are a real-time meeting coach. Analyze the latest transcript segment in the context of this meeting and provide actionable coaching.
+COACHING_PROMPT = """You are a real-time meeting coach. Analyze the latest transcript segment and provide ONLY high-priority, critical coaching.
 
 MEETING CONTEXT:
 {meeting_context}
@@ -49,7 +49,11 @@ TRANSCRIPT SO FAR (last 5 minutes for context):
 NEW SEGMENT TO ANALYZE:
 {new_segment}
 
-Based on this, provide coaching in the following JSON format. Be concise and actionable. Only include items that are clearly relevant - don't force suggestions.
+Provide coaching in JSON format. BE VERY SELECTIVE - only flag items that are:
+- Clear objections that need immediate response
+- Critical questions that would significantly move the conversation forward
+- Important topics from meeting prep that are overdue to mention
+- Direct competitor mentions that need addressing
 
 {{
   "objections": [
@@ -79,17 +83,19 @@ Based on this, provide coaching in the following JSON format. Be concise and act
   ],
   "observations": [
     {{
-      "type": "info|warning|opportunity",
+      "type": "opportunity|warning",
       "content": "Notable observation about the conversation"
     }}
   ]
 }}
 
-Important:
+CRITICAL RULES:
+- Return empty arrays for categories with nothing important - this is expected and good
+- Maximum 1-2 items total across ALL categories - less is more
+- Do NOT suggest questions just to fill space - only if truly valuable
+- Do NOT flag minor observations - only critical actionable items
+- If the conversation is flowing well, return all empty arrays
 - Only return valid JSON, no other text
-- Keep suggestions brief and immediately actionable
-- Focus on the NEW SEGMENT - don't repeat analysis of old content
-- If nothing notable in this segment, return empty arrays
 """
 
 
@@ -156,6 +162,8 @@ class CoachingEngine:
         self,
         model: str = "gemini-3-flash-preview",
         enabled: bool = True,
+        max_alerts_per_chunk: int = 2,
+        alert_cooldown_seconds: float = 180.0,  # 3 minutes between same alert types
     ) -> None:
         self.model = model
         self.enabled = enabled
@@ -163,6 +171,31 @@ class CoachingEngine:
         self._recent_transcript: list[str] = []  # Rolling window of recent chunks
         self._max_recent_chunks = 10  # ~5 minutes at 30-second chunks
         self._gemini_model = None
+        self._max_alerts_per_chunk = max_alerts_per_chunk
+        self._alert_cooldown_seconds = alert_cooldown_seconds
+        self._last_alert_times: dict[str, float] = {}  # alert_type -> timestamp
+        self._chunk_alert_count = 0  # Track alerts in current chunk
+
+    def _can_send_alert(self, alert_type: AlertType) -> bool:
+        """Check if we can send an alert based on cooldowns and limits."""
+        now = time.time()
+
+        # Check per-chunk limit
+        if self._chunk_alert_count >= self._max_alerts_per_chunk:
+            return False
+
+        # Check cooldown for this alert type
+        type_key = alert_type.value
+        last_time = self._last_alert_times.get(type_key, 0)
+        if now - last_time < self._alert_cooldown_seconds:
+            return False
+
+        return True
+
+    def _record_alert(self, alert_type: AlertType) -> None:
+        """Record that an alert was sent."""
+        self._last_alert_times[alert_type.value] = time.time()
+        self._chunk_alert_count += 1
 
     async def analyze_chunk(
         self,
@@ -189,28 +222,17 @@ class CoachingEngine:
         result = CoachingResult()
         event_bus = get_event_bus()
 
+        # Reset per-chunk alert counter
+        self._chunk_alert_count = 0
+
         # Update recent transcript window
         self._recent_transcript.append(chunk_text)
         if len(self._recent_transcript) > self._max_recent_chunks:
             self._recent_transcript.pop(0)
 
-        # 1. Local pace detection (no LLM cost)
-        pace_warning = self.pace_tracker.update(chunk_text)
-        if pace_warning:
-            alert = CoachingAlert(
-                id="",
-                alert_type=AlertType.PACE_WARNING,
-                content=pace_warning,
-            )
-            result.alerts.append(alert)
-            append_coaching_alert(paths, alert)
-            await event_bus.publish(
-                Event(
-                    type=EVENT_PACE_WARNING,
-                    data={"minutes_talking": self.pace_tracker.warning_threshold_minutes, "message": pace_warning},
-                    session_id=session_id,
-                )
-            )
+        # Pace detection disabled - can't distinguish user from other speakers
+        # TODO: Re-enable if we add speaker identification
+        # pace_warning = self.pace_tracker.update(chunk_text)
 
         # Skip LLM analysis if no meeting prep or chunk is silence
         if not prep or not chunk_text.strip() or chunk_text.strip() == "(silence)":
@@ -220,6 +242,8 @@ class CoachingEngine:
         if prep.competitors:
             mentions = find_competitor_mentions(chunk_text, prep.competitors)
             for competitor, context in mentions:
+                if not self._can_send_alert(AlertType.COMPETITOR_MENTION):
+                    break
                 alert = CoachingAlert(
                     id="",
                     alert_type=AlertType.COMPETITOR_MENTION,
@@ -228,6 +252,7 @@ class CoachingEngine:
                 )
                 result.alerts.append(alert)
                 append_coaching_alert(paths, alert)
+                self._record_alert(AlertType.COMPETITOR_MENTION)
                 await event_bus.publish(
                     Event(
                         type=EVENT_COMPETITOR_MENTION,
@@ -240,22 +265,26 @@ class CoachingEngine:
         newly_covered = update_topic_coverage(paths, chunk_text)
         result.topics_covered = newly_covered
 
-        # 4. LLM analysis for deeper insights
-        try:
-            llm_alerts = await self._analyze_with_llm(prep, chunk_text, session_id)
-            for alert in llm_alerts:
-                result.alerts.append(alert)
-                append_coaching_alert(paths, alert)
-                await event_bus.publish(
-                    Event(
-                        type=EVENT_COACHING_ALERT,
-                        data=alert.to_dict(),
-                        session_id=session_id,
+        # 4. LLM analysis for deeper insights (if we haven't hit chunk limit)
+        if self._chunk_alert_count < self._max_alerts_per_chunk:
+            try:
+                llm_alerts = await self._analyze_with_llm(prep, chunk_text, session_id)
+                for alert in llm_alerts:
+                    if not self._can_send_alert(alert.alert_type):
+                        continue
+                    result.alerts.append(alert)
+                    append_coaching_alert(paths, alert)
+                    self._record_alert(alert.alert_type)
+                    await event_bus.publish(
+                        Event(
+                            type=EVENT_COACHING_ALERT,
+                            data=alert.to_dict(),
+                            session_id=session_id,
+                        )
                     )
-                )
-        except Exception as e:
-            # Log but don't fail on LLM errors
-            print(f"[coaching] LLM analysis error: {e}")
+            except Exception as e:
+                # Log but don't fail on LLM errors
+                print(f"[coaching] LLM analysis error: {e}")
 
         return result
 
@@ -376,14 +405,15 @@ class CoachingEngine:
             if alert.content:
                 alerts.append(alert)
 
-        # Process general observations
+        # Process general observations (opportunities and warnings)
         for obs in data.get("observations", []):
-            if obs.get("type") == "opportunity":
+            obs_type = obs.get("type", "")
+            if obs_type in ("opportunity", "warning"):
                 alert = CoachingAlert(
                     id="",
                     alert_type=AlertType.CUSTOM_REMINDER,
                     content=obs.get("content", ""),
-                    metadata={"observation_type": obs.get("type")},
+                    metadata={"observation_type": obs_type},
                 )
                 if alert.content:
                     alerts.append(alert)
@@ -394,6 +424,8 @@ class CoachingEngine:
         """Reset the coaching engine state for a new session."""
         self.pace_tracker = PaceTracker()
         self._recent_transcript = []
+        self._last_alert_times = {}
+        self._chunk_alert_count = 0
 
 
 # Global coaching engine instance

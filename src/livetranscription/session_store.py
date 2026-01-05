@@ -290,10 +290,20 @@ def write_summary(paths: SessionPaths, *, summary: str, updated_at: Optional[str
     paths.summary_md.write_text(content, encoding="utf-8")
 
 
-def load_transcript_since(paths: SessionPaths, *, after_index: int) -> list[tuple[int, str]]:
+@dataclass
+class TranscriptChunkData:
+    """Data for a transcript chunk including segments."""
+
+    index: int
+    text: str
+    segments: list[TranscriptSegment]
+    recorded_at: Optional[str] = None
+
+
+def load_transcript_since(paths: SessionPaths, *, after_index: int) -> list[TranscriptChunkData]:
     if not paths.transcript_jsonl.exists():
         return []
-    out: list[tuple[int, str]] = []
+    out: list[TranscriptChunkData] = []
     for line in paths.transcript_jsonl.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line:
@@ -307,8 +317,14 @@ def load_transcript_since(paths: SessionPaths, *, after_index: int) -> list[tupl
         if not isinstance(idx, int) or not isinstance(text, str):
             continue
         if idx > after_index and text.strip():
-            out.append((idx, text))
-    out.sort(key=lambda t: t[0])
+            segments = [TranscriptSegment.from_dict(s) for s in obj.get("segments", [])]
+            out.append(TranscriptChunkData(
+                index=idx,
+                text=text,
+                segments=segments,
+                recorded_at=obj.get("recorded_at"),
+            ))
+    out.sort(key=lambda t: t.index)
     return out
 
 
