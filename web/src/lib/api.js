@@ -76,6 +76,12 @@ export async function getSummary(sessionId) {
   return request(`/sessions/${sessionId}/summary`);
 }
 
+export async function regenerateSummary(sessionId) {
+  return request(`/sessions/${sessionId}/summary/regenerate`, {
+    method: 'POST',
+  });
+}
+
 export async function getCoachingHistory(sessionId) {
   return request(`/sessions/${sessionId}/coaching`);
 }

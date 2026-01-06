@@ -1,10 +1,12 @@
 <script>
   import { onMount, afterUpdate } from 'svelte';
-  import { transcriptChunks, currentSummary } from '../lib/stores.js';
+  import { transcriptChunks, currentSummary, currentSession } from '../lib/stores.js';
+  import * as api from '../lib/api.js';
 
   let transcriptContainer;
   let autoScroll = true;
   let showSummary = false;
+  let regenerating = false;
 
   // Auto-scroll to bottom when new content arrives
   afterUpdate(() => {
@@ -30,6 +32,21 @@
 
   function toggleSummary() {
     showSummary = !showSummary;
+  }
+
+  async function handleRegenerate() {
+    if (!$currentSession || regenerating) return;
+
+    regenerating = true;
+    try {
+      const result = await api.regenerateSummary($currentSession.id);
+      currentSummary.set(result.summary);
+    } catch (e) {
+      console.error('Failed to regenerate summary:', e);
+      alert('Failed to regenerate summary: ' + e.message);
+    } finally {
+      regenerating = false;
+    }
   }
 
   // Generate a consistent color for each speaker
@@ -77,6 +94,14 @@
     <div class="summary-section">
       <div class="summary-header">
         <span class="badge info">Summary</span>
+        <button
+          class="secondary small regenerate-btn"
+          on:click={handleRegenerate}
+          disabled={regenerating}
+          title="Regenerate summary from transcript"
+        >
+          {regenerating ? 'Regenerating...' : 'Regenerate'}
+        </button>
       </div>
       <div class="summary-content">
         {@html $currentSummary.replace(/\n/g, '<br>')}
@@ -171,7 +196,15 @@
   }
 
   .summary-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     margin-bottom: 0.5rem;
+  }
+
+  .regenerate-btn {
+    font-size: 0.7rem;
+    padding: 0.2rem 0.5rem;
   }
 
   .summary-content {

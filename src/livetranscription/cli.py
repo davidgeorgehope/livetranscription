@@ -258,6 +258,56 @@ def run(
 
 
 @app.command()
+def regenerate_summary(
+    session_dir: Path = typer.Argument(..., help="Session directory to regenerate summary for."),
+    model: str = typer.Option("gemini-3-flash-preview", help="Gemini model for summary."),
+) -> None:
+    """Regenerate summary from existing transcript (useful if summary was truncated)."""
+    paths = resolve_session_paths(session_dir)
+
+    if not paths.transcript_jsonl.exists():
+        console.print(f"[red]Error:[/red] No transcript found at {paths.transcript_jsonl}")
+        raise typer.Exit(code=1)
+
+    # Load all transcript chunks
+    chunks = load_transcript_since(paths, after_index=-1)
+    if not chunks:
+        console.print("[yellow]No transcript chunks found.[/yellow]")
+        raise typer.Exit(code=1)
+
+    console.print(f"Found {len(chunks)} transcript chunks.")
+
+    # Combine all transcript text
+    full_transcript = "\n".join(chunk.text for chunk in chunks)
+    console.print(f"Total transcript: {len(full_transcript)} characters")
+
+    # Generate summary from scratch
+    console.print("Generating summary...")
+    try:
+        summary = update_running_summary(
+            previous_summary="",
+            new_transcript=full_transcript,
+            model=model,
+        )
+    except Exception as exc:
+        console.print(f"[red]Summary generation failed:[/red] {exc}")
+        raise typer.Exit(code=1)
+
+    # Save the new summary
+    write_summary(paths, summary=summary)
+
+    # Update state
+    state = load_state(paths)
+    if state:
+        state.summary = summary
+        state.last_summarized_index = chunks[-1].index
+        save_state(paths, state)
+
+    console.print("[green]Summary regenerated successfully![/green]")
+    console.print(Markdown(summary))
+
+
+@app.command()
 def web(
     host: str = typer.Option("127.0.0.1", help="Host to bind to."),
     port: int = typer.Option(8765, help="Port to bind to."),

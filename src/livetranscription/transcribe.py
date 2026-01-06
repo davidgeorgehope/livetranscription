@@ -126,6 +126,19 @@ def transcribe_file_gemini(
     raise last_exc
 
 
+def _extract_text_from_malformed_json(content: str) -> str:
+    """Try to extract the text field from malformed JSON."""
+    # Try to find "text": "..." pattern
+    match = re.search(r'"text"\s*:\s*"([^"]*(?:\\.[^"]*)*)"', content)
+    if match:
+        # Unescape the string
+        try:
+            return json.loads(f'"{match.group(1)}"')
+        except json.JSONDecodeError:
+            return match.group(1)
+    return ""
+
+
 def _parse_transcript_response(content: str) -> TranscriptResult:
     """Parse the JSON response from Gemini into a TranscriptResult."""
     # Clean up potential markdown code blocks
@@ -136,8 +149,16 @@ def _parse_transcript_response(content: str) -> TranscriptResult:
 
     try:
         data = json.loads(content)
-    except json.JSONDecodeError as e:
-        # If JSON parsing fails, return as plain text
+    except json.JSONDecodeError:
+        # If JSON parsing fails, try to extract text from malformed JSON
+        extracted = _extract_text_from_malformed_json(content)
+        if extracted:
+            return TranscriptResult(text=extracted, segments=[])
+        # If content looks like JSON (starts with {), it's malformed - return silence
+        if content.strip().startswith("{"):
+            print(f"[transcribe] Warning: Malformed JSON response, skipping: {content[:100]}...")
+            return TranscriptResult(text="(transcription error)", segments=[])
+        # Otherwise treat as plain text
         return TranscriptResult(text=content.strip() or "(silence)", segments=[])
 
     text = data.get("text", "")

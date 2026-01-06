@@ -89,12 +89,11 @@ Provide coaching in JSON format. BE VERY SELECTIVE - only flag items that are:
   ]
 }}
 
-CRITICAL RULES:
-- Return empty arrays for categories with nothing important - this is expected and good
-- Maximum 1-2 items total across ALL categories - less is more
-- Do NOT suggest questions just to fill space - only if truly valuable
-- Do NOT flag minor observations - only critical actionable items
-- If the conversation is flowing well, return all empty arrays
+RULES:
+- Return empty arrays for categories with nothing important
+- Be selective but don't miss genuinely useful insights
+- Prioritize: objections > opportunities > questions > observations
+- Do NOT suggest questions just to fill space
 - Only return valid JSON, no other text
 """
 
@@ -162,8 +161,8 @@ class CoachingEngine:
         self,
         model: str = "gemini-3-flash-preview",
         enabled: bool = True,
-        max_alerts_per_chunk: int = 2,
-        alert_cooldown_seconds: float = 180.0,  # 3 minutes between same alert types
+        max_alerts_per_chunk: int = 3,
+        alert_cooldown_seconds: float = 120.0,  # 2 minutes between same alert types
     ) -> None:
         self.model = model
         self.enabled = enabled
@@ -234,12 +233,12 @@ class CoachingEngine:
         # TODO: Re-enable if we add speaker identification
         # pace_warning = self.pace_tracker.update(chunk_text)
 
-        # Skip LLM analysis if no meeting prep or chunk is silence
-        if not prep or not chunk_text.strip() or chunk_text.strip() == "(silence)":
+        # Skip if chunk is silence
+        if not chunk_text.strip() or chunk_text.strip() == "(silence)":
             return result
 
-        # 2. Local competitor detection (fast regex)
-        if prep.competitors:
+        # 2. Local competitor detection (fast regex) - only if prep exists
+        if prep and prep.competitors:
             mentions = find_competitor_mentions(chunk_text, prep.competitors)
             for competitor, context in mentions:
                 if not self._can_send_alert(AlertType.COMPETITOR_MENTION):
@@ -261,30 +260,30 @@ class CoachingEngine:
                     )
                 )
 
-        # 3. Local topic coverage check
-        newly_covered = update_topic_coverage(paths, chunk_text)
-        result.topics_covered = newly_covered
+        # 3. Local topic coverage check - only if prep exists
+        if prep:
+            newly_covered = update_topic_coverage(paths, chunk_text)
+            result.topics_covered = newly_covered
 
-        # 4. LLM analysis for deeper insights (if we haven't hit chunk limit)
-        if self._chunk_alert_count < self._max_alerts_per_chunk:
-            try:
-                llm_alerts = await self._analyze_with_llm(prep, chunk_text, session_id)
-                for alert in llm_alerts:
-                    if not self._can_send_alert(alert.alert_type):
-                        continue
-                    result.alerts.append(alert)
-                    append_coaching_alert(paths, alert)
-                    self._record_alert(alert.alert_type)
-                    await event_bus.publish(
-                        Event(
-                            type=EVENT_COACHING_ALERT,
-                            data=alert.to_dict(),
-                            session_id=session_id,
-                        )
+        # 4. LLM analysis for deeper insights (always run, apply limits when publishing)
+        try:
+            llm_alerts = await self._analyze_with_llm(prep, chunk_text, session_id)
+            for alert in llm_alerts:
+                if not self._can_send_alert(alert.alert_type):
+                    continue
+                result.alerts.append(alert)
+                append_coaching_alert(paths, alert)
+                self._record_alert(alert.alert_type)
+                await event_bus.publish(
+                    Event(
+                        type=EVENT_COACHING_ALERT,
+                        data=alert.to_dict(),
+                        session_id=session_id,
                     )
-            except Exception as e:
-                # Log but don't fail on LLM errors
-                print(f"[coaching] LLM analysis error: {e}")
+                )
+        except Exception as e:
+            # Log but don't fail on LLM errors
+            print(f"[coaching] LLM analysis error: {e}")
 
         return result
 
@@ -298,7 +297,7 @@ class CoachingEngine:
 
     async def _analyze_with_llm(
         self,
-        prep: MeetingPrepContext,
+        prep: Optional[MeetingPrepContext],
         chunk_text: str,
         session_id: str,
     ) -> list[CoachingAlert]:
@@ -310,15 +309,18 @@ class CoachingEngine:
         import asyncio
 
         # Build the prompt
-        meeting_context = format_meeting_prep_for_prompt(prep)
-        recent_transcript = "\n".join(self._recent_transcript[:-1])  # Exclude current chunk
+        if prep:
+            meeting_context = format_meeting_prep_for_prompt(prep)
+            # Add meeting type hints
+            hints = get_meeting_type_coaching_hints(prep.meeting_type)
+            if hints:
+                meeting_context += "\n\nCoaching focus:\n"
+                for key, value in hints.items():
+                    meeting_context += f"  - {key}: {value}\n"
+        else:
+            meeting_context = "(No meeting prep provided - provide general coaching based on conversation)"
 
-        # Add meeting type hints
-        hints = get_meeting_type_coaching_hints(prep.meeting_type)
-        if hints:
-            meeting_context += "\n\nCoaching focus:\n"
-            for key, value in hints.items():
-                meeting_context += f"  - {key}: {value}\n"
+        recent_transcript = "\n".join(self._recent_transcript[:-1])  # Exclude current chunk
 
         prompt = COACHING_PROMPT.format(
             meeting_context=meeting_context,

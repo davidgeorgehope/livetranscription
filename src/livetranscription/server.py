@@ -701,6 +701,43 @@ def get_summary(session_id: str):
     )
 
 
+@app.post("/api/sessions/{session_id}/summary/regenerate", response_model=SummaryResponse)
+def regenerate_summary(session_id: str):
+    """Regenerate summary from transcript (useful if summary was truncated)."""
+    paths, state = get_session_by_id(session_id)
+
+    # Load all transcript chunks
+    chunks = load_transcript_since(paths, after_index=-1)
+    if not chunks:
+        raise HTTPException(status_code=400, detail="No transcript chunks found")
+
+    # Combine all transcript text
+    full_transcript = "\n".join(chunk.text for chunk in chunks)
+
+    # Generate summary from scratch
+    try:
+        summary = update_running_summary(
+            previous_summary="",
+            new_transcript=full_transcript,
+            model="gemini-3-flash-preview",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Summary generation failed: {exc}")
+
+    # Save the new summary
+    write_summary(paths, summary=summary)
+
+    # Update state
+    state.summary = summary
+    state.last_summarized_index = chunks[-1].index
+    save_state(paths, state)
+
+    return SummaryResponse(
+        session_id=session_id,
+        summary=summary,
+    )
+
+
 @app.get("/api/sessions/{session_id}/coaching", response_model=CoachingHistoryResponse)
 def get_coaching_history(session_id: str):
     """Get coaching alert history for a session."""
