@@ -86,6 +86,7 @@ class SessionCreate(BaseModel):
     summary_minutes: int = 5
     language: Optional[str] = None
     keep_audio: bool = False
+    max_duration_hours: float = Field(default=8.0, ge=0.5, le=24.0)
 
 
 class SessionStartRequest(BaseModel):

@@ -87,6 +87,7 @@ class ActiveSession:
         self.language: Optional[str] = None
         self.transcribe_model: str = "gemini-3-flash-preview"
         self.coaching_model: str = "gemini-3-flash-preview"
+        self.max_duration_seconds: int = 8 * 3600  # Default 8 hours
 
 
 _active_sessions: dict[str, ActiveSession] = {}
@@ -268,6 +269,7 @@ def create_session(request: SessionCreate):
     active.summary_minutes = request.summary_minutes
     active.keep_audio = request.keep_audio
     active.language = request.language
+    active.max_duration_seconds = int(request.max_duration_hours * 3600)
     active.status = SessionStatus.CREATED
 
     _active_sessions[timestamp] = active
@@ -474,6 +476,32 @@ async def _process_chunks(active: ActiveSession) -> None:
 
     while active.status == SessionStatus.RECORDING:
         try:
+            # Check max duration
+            if active.max_duration_seconds and active.started_at:
+                elapsed = (datetime.now() - active.started_at).total_seconds()
+                if elapsed >= active.max_duration_seconds:
+                    hours = active.max_duration_seconds / 3600
+                    print(f"[server] Auto-stopping session {active.session_id}: {hours}h limit reached")
+                    if active.ffmpeg_process:
+                        active.ffmpeg_process.send_signal(signal.SIGINT)
+                        active.ffmpeg_process.wait(timeout=10)
+                        active.ffmpeg_process = None
+                    active.stopped_at = datetime.now()
+                    active.status = SessionStatus.STOPPED
+                    await broadcast_to_session(
+                        active.session_id,
+                        {
+                            "type": "session_status",
+                            "data": {
+                                "status": "stopped",
+                                "reason": "max_duration_reached",
+                                "message": f"Session auto-stopped after {hours:.0f}h limit.",
+                            },
+                        },
+                    )
+                    await _run_summary(active, force=True)
+                    return
+
             # Look for next chunk
             chunk = find_next_completed_chunk(
                 active.paths.chunks_dir,

@@ -105,6 +105,9 @@
 
     wsManager.on('session_status', (data) => {
       sessionStatus.set(data.status);
+      if (data.reason === 'max_duration_reached') {
+        lastError.set(data.message || 'Session auto-stopped: maximum duration reached.');
+      }
     });
 
     wsManager.connect();
