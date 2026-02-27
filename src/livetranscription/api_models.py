@@ -87,6 +87,14 @@ class SessionCreate(BaseModel):
     language: Optional[str] = None
     keep_audio: bool = False
     max_duration_hours: float = Field(default=8.0, ge=0.5, le=24.0)
+    inactivity_timeout_minutes: float = Field(
+        default=5.0, ge=1.0, le=60.0,
+        description="Auto-stop after this many minutes of silence or sparse conversation. 0 to disable.",
+    )
+    inactivity_word_threshold: int = Field(
+        default=5, ge=1, le=50,
+        description="Chunks with fewer meaningful words than this are considered inactive.",
+    )
 
 
 class SessionStartRequest(BaseModel):

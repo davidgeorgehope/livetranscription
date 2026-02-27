@@ -107,6 +107,8 @@
       sessionStatus.set(data.status);
       if (data.reason === 'max_duration_reached') {
         lastError.set(data.message || 'Session auto-stopped: maximum duration reached.');
+      } else if (data.reason === 'meeting_ended_inactivity') {
+        lastError.set(data.message || 'Session auto-stopped: meeting appears to have ended (no activity detected).');
       }
     });
 

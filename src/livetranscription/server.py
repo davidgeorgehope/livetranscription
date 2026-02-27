@@ -7,6 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
 import subprocess
 from contextlib import asynccontextmanager
@@ -88,6 +89,9 @@ class ActiveSession:
         self.transcribe_model: str = "gemini-3-flash-preview"
         self.coaching_model: str = "gemini-3-flash-preview"
         self.max_duration_seconds: int = 8 * 3600  # Default 8 hours
+        self.inactivity_timeout_chunks: int = 10  # Consecutive inactive chunks before auto-stop
+        self.inactivity_word_threshold: int = 5  # Words below which a chunk is "inactive"
+        self._consecutive_inactive_chunks: int = 0
 
 
 _active_sessions: dict[str, ActiveSession] = {}
@@ -270,6 +274,10 @@ def create_session(request: SessionCreate):
     active.keep_audio = request.keep_audio
     active.language = request.language
     active.max_duration_seconds = int(request.max_duration_hours * 3600)
+    active.inactivity_timeout_chunks = int(
+        (request.inactivity_timeout_minutes * 60) / request.chunk_seconds
+    )
+    active.inactivity_word_threshold = request.inactivity_word_threshold
     active.status = SessionStatus.CREATED
 
     _active_sessions[timestamp] = active
@@ -465,6 +473,31 @@ async def stop_session(session_id: str):
     return get_session(session_id)
 
 
+def _is_chunk_inactive(text: str, word_threshold: int) -> bool:
+    """Check if a transcribed chunk represents silence or sparse conversation.
+
+    Returns True if the chunk is effectively silent/inactive:
+    - Explicit silence markers like "(silence)"
+    - Very few meaningful words (below threshold)
+    """
+    stripped = text.strip()
+    if not stripped:
+        return True
+
+    # Check for silence markers
+    lower = stripped.lower()
+    if lower in ("(silence)", "[silence]", "silence", "(no speech)", "(inaudible)"):
+        return True
+
+    # Count meaningful words (strip speaker labels like [Speaker 1])
+    clean = re.sub(r"\[Speaker\s*\d+\]", "", stripped)
+    # Also strip common filler-only chunks
+    clean = re.sub(r"[^\w\s]", "", clean)  # Remove punctuation
+    words = [w for w in clean.split() if len(w) > 1]  # Skip single-letter fragments
+
+    return len(words) < word_threshold
+
+
 async def _process_chunks(active: ActiveSession) -> None:
     """Background task to process audio chunks as they're created."""
     from .chunk_watcher import find_next_completed_chunk, wait_for_file_stable
@@ -607,6 +640,52 @@ async def _process_chunks(active: ActiveSession) -> None:
                         "data": alert.to_dict(),
                     },
                 )
+
+            # Track inactivity for meeting-end detection
+            if active.inactivity_timeout_chunks > 0:
+                if _is_chunk_inactive(text, active.inactivity_word_threshold):
+                    active._consecutive_inactive_chunks += 1
+                    inactive_seconds = active._consecutive_inactive_chunks * active.state.chunk_seconds
+                    inactive_minutes = inactive_seconds / 60
+                    print(
+                        f"[server] Inactive chunk #{active._consecutive_inactive_chunks} "
+                        f"({inactive_minutes:.1f}m) - threshold: {active.inactivity_timeout_chunks} chunks"
+                    )
+
+                    if active._consecutive_inactive_chunks >= active.inactivity_timeout_chunks:
+                        print(
+                            f"[server] Auto-stopping session {active.session_id}: "
+                            f"meeting appears ended ({inactive_minutes:.0f}m of inactivity)"
+                        )
+                        if active.ffmpeg_process:
+                            active.ffmpeg_process.send_signal(signal.SIGINT)
+                            active.ffmpeg_process.wait(timeout=10)
+                            active.ffmpeg_process = None
+                        active.stopped_at = datetime.now()
+                        active.status = SessionStatus.STOPPED
+                        await broadcast_to_session(
+                            active.session_id,
+                            {
+                                "type": "session_status",
+                                "data": {
+                                    "status": "stopped",
+                                    "reason": "meeting_ended_inactivity",
+                                    "message": (
+                                        f"Session auto-stopped: no meaningful conversation "
+                                        f"detected for {inactive_minutes:.0f} minutes."
+                                    ),
+                                },
+                            },
+                        )
+                        await _run_summary(active, force=True)
+                        return
+                else:
+                    # Reset counter on any meaningful conversation
+                    if active._consecutive_inactive_chunks > 0:
+                        print(
+                            f"[server] Inactivity counter reset (was {active._consecutive_inactive_chunks})"
+                        )
+                    active._consecutive_inactive_chunks = 0
 
             # Check if we should run summary
             chunks_since_summary = chunk_index - last_summary_index
