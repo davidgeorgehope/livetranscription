@@ -27,6 +27,33 @@ export async function listDevices() {
   return request('/devices');
 }
 
+// Availability of the saved default audio devices used for recording.
+export async function getDeviceStatus() {
+  return request('/devices/status');
+}
+
+// Settings endpoints
+export async function getSettings() {
+  return request('/settings');
+}
+
+export async function saveSettings(data) {
+  return request('/settings', {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export async function getAutoRecordStatus() {
+  return request('/auto-record/status');
+}
+
+export async function checkAutoRecordNow() {
+  return request('/auto-record/check', {
+    method: 'POST',
+  });
+}
+
 // Session endpoints
 export async function listSessions() {
   return request('/sessions');

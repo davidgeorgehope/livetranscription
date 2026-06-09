@@ -81,7 +81,7 @@ class MeetingPrepCreate(BaseModel):
 class SessionCreate(BaseModel):
     """Request model for creating a new session."""
 
-    device_index: str  # Can be single index "0" or comma-separated "0,1" for mixing
+    device_index: Optional[str] = None  # If omitted, the server resolves the saved default devices
     chunk_seconds: int = 30
     summary_minutes: int = 5
     language: Optional[str] = None
@@ -101,6 +101,47 @@ class SessionStartRequest(BaseModel):
     """Request model for starting a session."""
 
     device_index: Optional[str] = None  # Override if different from creation
+
+
+class SavedAudioDevice(BaseModel):
+    """A saved audio device preference."""
+
+    index: int
+    name: str
+
+
+class AppSettingsUpdate(BaseModel):
+    """Request model for updating app-wide settings."""
+
+    default_devices: list[SavedAudioDevice] = Field(default_factory=list)
+    chunk_seconds: int = Field(default=30, ge=5, le=300)
+    summary_minutes: int = Field(default=5, ge=1, le=60)
+    auto_record_enabled: bool = False
+    auto_record_start_window_minutes: int = Field(default=2, ge=1, le=30)
+    auto_record_join_grace_minutes: int = Field(default=3, ge=0, le=30)
+    auto_record_poll_seconds: int = Field(default=30, ge=10, le=300)
+    auto_record_require_meeting_link: bool = True
+    auto_record_skip_private_events: bool = True
+    google_calendar_credentials_path: Optional[str] = None
+
+
+class AppSettingsResponse(AppSettingsUpdate):
+    """Response model for app-wide settings."""
+
+    updated_at: Optional[datetime] = None
+
+
+class AutoRecordStatusResponse(BaseModel):
+    """Response model for automatic recording watcher status."""
+
+    enabled: bool
+    running: bool
+    last_checked_at: Optional[datetime] = None
+    last_error: Optional[str] = None
+    last_started_at: Optional[datetime] = None
+    last_started_event_id: Optional[str] = None
+    last_started_event_title: Optional[str] = None
+    current_session_id: Optional[str] = None
 
 
 # ----- Response Models -----
@@ -229,6 +270,23 @@ class DeviceListResponse(BaseModel):
     """Response model for listing audio devices."""
 
     devices: list[DeviceInfo]
+
+
+class ConfiguredDeviceStatus(BaseModel):
+    """Availability of a saved default audio device, matched by name."""
+
+    name: str
+    index: Optional[int] = None  # Current AVFoundation index, when available
+    available: bool
+
+
+class DeviceStatusResponse(BaseModel):
+    """Availability of the saved default audio devices used for recording."""
+
+    configured: list[ConfiguredDeviceStatus]
+    missing: list[str]  # Names of configured devices not currently present
+    all_available: bool  # True only when defaults exist and every one is present
+    has_defaults: bool  # Whether any default devices are configured at all
 
 
 # ----- WebSocket Message Models -----

@@ -35,6 +35,13 @@ export const uncoveredTopics = derived(meetingPrep, ($prep) => {
 // Audio devices
 export const audioDevices = writable([]);
 
+// Availability of the configured default audio devices (polled from the backend).
+// Shape: { configured: [{name, index, available}], missing: [name], all_available, has_defaults }
+export const deviceStatus = writable(null);
+
+// App settings
+export const appSettings = writable(null);
+
 // Connection status
 export const wsConnected = writable(false);
 

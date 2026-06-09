@@ -159,7 +159,7 @@ class CoachingEngine:
 
     def __init__(
         self,
-        model: str = "gemini-3-flash-preview",
+        model: str = "gemini-3.5-flash",
         enabled: bool = True,
         max_alerts_per_chunk: int = 3,
         alert_cooldown_seconds: float = 120.0,  # 2 minutes between same alert types

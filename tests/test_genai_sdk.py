@@ -67,7 +67,7 @@ def test_simple_api_call():
     client = genai.Client()
 
     response = client.models.generate_content(
-        model="gemini-3-flash-preview",
+        model="gemini-3.5-flash",
         contents="Say 'hello' and nothing else.",
         config=types.GenerateContentConfig(
             temperature=0.0,
@@ -94,7 +94,7 @@ def test_json_response_mode():
     client = genai.Client()
 
     response = client.models.generate_content(
-        model="gemini-3-flash-preview",
+        model="gemini-3.5-flash",
         contents='Return ONLY a JSON object with a single key "status" and value "ok". No other text.',
         config=types.GenerateContentConfig(
             temperature=0.0,

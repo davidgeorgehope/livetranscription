@@ -76,8 +76,8 @@ def run(
     out_dir: Optional[Path] = typer.Option(None, help="Session output folder."),
     keep_audio: bool = typer.Option(False, help="Keep audio chunk files."),
     language: Optional[str] = typer.Option(None, help="Optional language hint (e.g., 'en')."),
-    model: str = typer.Option("gemini-3-flash-preview", help="Gemini model for transcription."),
-    summary_model: str = typer.Option("gemini-3-flash-preview", help="Gemini model for summaries."),
+    model: str = typer.Option("gemini-3.5-flash", help="Gemini model for transcription."),
+    summary_model: str = typer.Option("gemini-3.5-flash", help="Gemini model for summaries."),
     no_diarize: bool = typer.Option(False, help="Disable speaker diarization."),
 ) -> None:
     """Record, transcribe chunks, and write rolling summaries."""
@@ -260,7 +260,7 @@ def run(
 @app.command()
 def regenerate_summary(
     session_dir: Path = typer.Argument(..., help="Session directory to regenerate summary for."),
-    model: str = typer.Option("gemini-3-flash-preview", help="Gemini model for summary."),
+    model: str = typer.Option("gemini-3.5-flash", help="Gemini model for summary."),
 ) -> None:
     """Regenerate summary from existing transcript (useful if summary was truncated)."""
     paths = resolve_session_paths(session_dir)

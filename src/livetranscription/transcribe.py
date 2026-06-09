@@ -43,7 +43,7 @@ CRITICAL: Only transcribe actual human speech you can clearly hear. When in doub
 def transcribe_file_gemini(
     path: Path,
     *,
-    model: str = "gemini-3-flash-preview",
+    model: str = "gemini-3.5-flash",
     language: Optional[str] = None,
     diarize: bool = True,
     max_attempts: int = 3,
@@ -180,7 +180,7 @@ def _parse_transcript_response(content: str) -> TranscriptResult:
 async def transcribe_file_gemini_async(
     path: Path,
     *,
-    model: str = "gemini-3-flash-preview",
+    model: str = "gemini-3.5-flash",
     language: Optional[str] = None,
     diarize: bool = True,
     max_attempts: int = 3,
@@ -200,7 +200,7 @@ async def transcribe_file_gemini_async(
 def transcribe_file_whisper(
     path: Path,
     *,
-    model: str = "gemini-3-flash-preview",
+    model: str = "gemini-3.5-flash",
     language: Optional[str] = None,
     max_attempts: int = 3,
 ) -> str:
@@ -222,7 +222,7 @@ def transcribe_file_whisper(
 async def transcribe_file_whisper_async(
     path: Path,
     *,
-    model: str = "gemini-3-flash-preview",
+    model: str = "gemini-3.5-flash",
     language: Optional[str] = None,
     max_attempts: int = 3,
 ) -> str:

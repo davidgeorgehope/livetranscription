@@ -175,6 +175,7 @@ def start_ffmpeg_segmenter(
     sample_rate_hz: int = 16000,
     channels: int = 1,
     segment_start_number: Optional[int] = None,
+    loglevel: str = "error",
 ) -> subprocess.Popen[bytes]:
     cmd = build_ffmpeg_segment_command(
         device=device,
@@ -183,6 +184,7 @@ def start_ffmpeg_segmenter(
         sample_rate_hz=sample_rate_hz,
         channels=channels,
         segment_start_number=segment_start_number,
+        loglevel=loglevel,
     )
 
     stderr_target = subprocess.DEVNULL

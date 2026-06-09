@@ -6,9 +6,11 @@
   import SessionControls from './components/SessionControls.svelte';
   import SessionList from './components/SessionList.svelte';
   import ChatPanel from './components/ChatPanel.svelte';
+  import Settings from './components/Settings.svelte';
   import { WebSocketManager, startPing } from './lib/websocket.js';
   import * as api from './lib/api.js';
   import {
+    appSettings,
     currentSession,
     sessionStatus,
     transcriptChunks,
@@ -16,6 +18,7 @@
     currentSummary,
     meetingPrep,
     audioDevices,
+    deviceStatus,
     wsConnected,
     lastError,
     addTranscriptChunk,
@@ -23,46 +26,126 @@
     resetSession,
   } from './lib/stores.js';
 
-  let activeTab = 'current'; // 'current' | 'sessions' | 'chat'
+  let activeTab = 'current'; // 'current' | 'sessions' | 'chat' | 'settings'
   let view = 'prep'; // 'prep' | 'session'
   let selectedDevices = [];
   let wsManager = null;
   let stopPing = null;
   let loading = false;
+  let autoRecordStatus = null;
+  let deviceStatusInterval = null;
 
   onMount(async () => {
-    await loadDevices();
+    const [devices, settings] = await Promise.all([
+      loadDevices(),
+      loadSettings(),
+      loadAutoRecordStatus(),
+      loadDeviceStatus(),
+    ]);
+    applySavedDefaults(settings, devices);
+    // Poll device availability so the UI reflects mics being (un)plugged.
+    deviceStatusInterval = setInterval(loadDeviceStatus, 5000);
   });
 
   onDestroy(() => {
     if (stopPing) stopPing();
     if (wsManager) wsManager.disconnect();
+    if (deviceStatusInterval) clearInterval(deviceStatusInterval);
   });
 
   async function loadDevices() {
     try {
       const response = await api.listDevices();
-      audioDevices.set(response.devices.filter((d) => d.type === 'audio'));
+      const devices = response.devices.filter((d) => d.type === 'audio');
+      audioDevices.set(devices);
+      return devices;
     } catch (e) {
       console.error('Failed to load devices:', e);
       lastError.set(e.message);
+      return [];
+    }
+  }
+
+  async function loadSettings() {
+    try {
+      const settings = await api.getSettings();
+      appSettings.set(settings);
+      return settings;
+    } catch (e) {
+      console.error('Failed to load settings:', e);
+      lastError.set(e.message);
+      return null;
+    }
+  }
+
+  async function loadDeviceStatus() {
+    try {
+      const status = await api.getDeviceStatus();
+      deviceStatus.set(status);
+      return status;
+    } catch (e) {
+      console.error('Failed to load device status:', e);
+      return null;
+    }
+  }
+
+  async function loadAutoRecordStatus() {
+    try {
+      autoRecordStatus = await api.getAutoRecordStatus();
+      return autoRecordStatus;
+    } catch (e) {
+      console.error('Failed to load auto-record status:', e);
+      return null;
+    }
+  }
+
+  function resolveSavedDeviceIndices(settings, devices) {
+    if (!settings?.default_devices?.length || !devices?.length) {
+      return [];
+    }
+
+    const byName = new Map(devices.map((device) => [device.name, device]));
+    const byIndex = new Map(devices.map((device) => [device.index, device]));
+    const resolved = [];
+
+    for (const savedDevice of settings.default_devices) {
+      const match = byName.get(savedDevice.name) || byIndex.get(savedDevice.index);
+      if (match && !resolved.includes(match.index)) {
+        resolved.push(match.index);
+      }
+    }
+
+    return resolved;
+  }
+
+  function applySavedDefaults(settings, devices) {
+    const savedDevices = resolveSavedDeviceIndices(settings, devices);
+    if (savedDevices.length > 0) {
+      selectedDevices = savedDevices;
     }
   }
 
   async function handleNewSession() {
-    if (selectedDevices.length === 0) {
-      lastError.set('Please select at least one audio device');
+    // Confirm the configured audio devices are present before recording.
+    const status = await loadDeviceStatus();
+    if (!status?.has_defaults) {
+      lastError.set('No default audio devices configured. Set them in Settings first.');
+      return;
+    }
+    if (!status.all_available) {
+      lastError.set(
+        `Waiting for audio devices: ${status.missing.join(', ')}. ` +
+        `Recording will produce poor audio without them — connect them and try again.`
+      );
       return;
     }
 
     loading = true;
     try {
-      // Join device indices as comma-separated string for mixing
-      const deviceString = selectedDevices.join(',');
+      // Devices are resolved server-side from the saved defaults (matched by name).
       const session = await api.createSession({
-        device_index: deviceString,
-        chunk_seconds: 30,
-        summary_minutes: 5,
+        chunk_seconds: $appSettings?.chunk_seconds || 30,
+        summary_minutes: $appSettings?.summary_minutes || 5,
       });
       currentSession.set(session);
       sessionStatus.set('created');
@@ -109,6 +192,8 @@
         lastError.set(data.message || 'Session auto-stopped: maximum duration reached.');
       } else if (data.reason === 'meeting_ended_inactivity') {
         lastError.set(data.message || 'Session auto-stopped: meeting appears to have ended (no activity detected).');
+      } else if (data.message) {
+        lastError.set(data.message);
       }
     });
 
@@ -226,6 +311,39 @@
       loading = false;
     }
   }
+
+  async function handleSettingsSave(event) {
+    loading = true;
+    try {
+      const settings = await api.saveSettings(event.detail);
+      appSettings.set(settings);
+      applySavedDefaults(settings, $audioDevices);
+      await loadAutoRecordStatus();
+      lastError.set(null);
+    } catch (e) {
+      console.error('Failed to save settings:', e);
+      lastError.set(e.message);
+    } finally {
+      loading = false;
+    }
+  }
+
+  async function handleAutoRecordCheck() {
+    loading = true;
+    try {
+      autoRecordStatus = await api.checkAutoRecordNow();
+      if (autoRecordStatus?.last_error) {
+        lastError.set(autoRecordStatus.last_error);
+      } else {
+        lastError.set(null);
+      }
+    } catch (e) {
+      console.error('Failed to check auto-record:', e);
+      lastError.set(e.message);
+    } finally {
+      loading = false;
+    }
+  }
 </script>
 
 <div class="app">
@@ -253,12 +371,18 @@
       >
         Chat
       </button>
+      <button
+        class="tab"
+        class:active={activeTab === 'settings'}
+        on:click={() => activeTab = 'settings'}
+      >
+        Settings
+      </button>
     </nav>
   </header>
 
   {#if activeTab === 'current'}
   <SessionControls
-    bind:selectedDevices
     on:start={handleStart}
     on:stop={handleStop}
     on:new={handleNewSessionClick}
@@ -278,13 +402,15 @@
           <h2>Welcome to Live Transcription Coach</h2>
           <p>Get real-time coaching and suggestions during your meetings.</p>
           <ol class="steps">
-            <li>Select an audio device above</li>
+            <li>Configure your audio devices in Settings (one-time)</li>
             <li>Click "New Session" to start</li>
             <li>Enter meeting prep context (optional)</li>
             <li>Start recording and get coached!</li>
           </ol>
-          {#if $audioDevices.length === 0}
-            <p class="text-muted">Loading audio devices...</p>
+          {#if $deviceStatus && !$deviceStatus.has_defaults}
+            <p class="text-muted">No audio devices configured yet — head to Settings to pick your mic and system audio.</p>
+          {:else if $deviceStatus && !$deviceStatus.all_available}
+            <p class="text-muted">Waiting for audio devices: {$deviceStatus.missing.join(', ')}.</p>
           {/if}
         </div>
       </div>
@@ -308,6 +434,15 @@
   {:else if activeTab === 'chat'}
   <main class="app-main chat-main">
     <ChatPanel />
+  </main>
+  {:else if activeTab === 'settings'}
+  <main class="app-main settings-main">
+    <Settings
+      bind:selectedDevices
+      {autoRecordStatus}
+      on:save={handleSettingsSave}
+      on:checkAutoRecord={handleAutoRecordCheck}
+    />
   </main>
   {/if}
 
@@ -392,7 +527,12 @@
 
   .app-main {
     flex: 1;
+    min-height: 0;
     overflow: hidden;
+  }
+
+  .settings-main {
+    overflow-y: auto;
   }
 
   .welcome-screen {
