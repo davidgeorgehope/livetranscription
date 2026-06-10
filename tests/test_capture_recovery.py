@@ -4,9 +4,13 @@ import subprocess
 import time
 from datetime import datetime, timedelta
 
+import livetranscription.server as server
+from livetranscription.ffmpeg_capture import AVFoundationDevice
 from livetranscription.server import (
     _capture_is_stalled,
     _capture_stall_timeout_seconds,
+    _device_names_for_indices,
+    _missing_device_names,
     _next_segment_number,
     _shutdown_ffmpeg,
 )
@@ -120,3 +124,55 @@ def test_next_segment_number_uses_processed_index_when_chunks_deleted(tmp_path):
 
 def test_next_segment_number_for_fresh_session(tmp_path):
     assert _next_segment_number(tmp_path, last_processed_index=-1) == 0
+
+
+def _fake_device_list(monkeypatch, devices):
+    monkeypatch.setattr(
+        server, "ffmpeg_list_avfoundation_devices", lambda: devices
+    )
+
+
+_ATTACHED = [
+    AVFoundationDevice(index=0, name="ZoomAudioDevice", kind="audio"),
+    AVFoundationDevice(index=3, name="David's AirPods Max #2", kind="audio"),
+    AVFoundationDevice(index=4, name="External Microphone", kind="audio"),
+    AVFoundationDevice(index=0, name="FaceTime Camera", kind="video"),
+]
+
+
+def test_device_names_resolved_from_index_string(monkeypatch):
+    _fake_device_list(monkeypatch, _ATTACHED)
+    assert _device_names_for_indices("3,4") == [
+        "David's AirPods Max #2",
+        "External Microphone",
+    ]
+
+
+def test_device_names_empty_when_listing_fails(monkeypatch):
+    def boom():
+        raise RuntimeError("no ffmpeg")
+
+    monkeypatch.setattr(server, "ffmpeg_list_avfoundation_devices", boom)
+    assert _device_names_for_indices("3,4") == []
+
+
+def test_no_missing_devices_while_all_attached(monkeypatch):
+    _fake_device_list(monkeypatch, _ATTACHED)
+    assert (
+        _missing_device_names(["David's AirPods Max #2", "External Microphone"]) == []
+    )
+
+
+def test_missing_device_reported_after_disconnect(monkeypatch):
+    _fake_device_list(monkeypatch, [d for d in _ATTACHED if "AirPods" not in d.name])
+    assert _missing_device_names(
+        ["David's AirPods Max #2", "External Microphone"]
+    ) == ["David's AirPods Max #2"]
+
+
+def test_listing_failure_is_not_treated_as_disconnect(monkeypatch):
+    def boom():
+        raise RuntimeError("no ffmpeg")
+
+    monkeypatch.setattr(server, "ffmpeg_list_avfoundation_devices", boom)
+    assert _missing_device_names(["David's AirPods Max #2"]) == []

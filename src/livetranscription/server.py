@@ -125,6 +125,11 @@ class ActiveSession:
         self._consecutive_inactive_chunks: int = 0
         self.capture_started_at: Optional[datetime] = None
         self.capture_restarts: int = 0
+        # Device names backing device_index, resolved at recording start, so we
+        # can notice disconnects and re-resolve indices (which shift) by name.
+        self.device_names: list[str] = []
+        self._last_device_check: float = 0.0
+        self._device_missing_checks: int = 0
 
 
 _active_sessions: dict[str, ActiveSession] = {}
@@ -818,6 +823,11 @@ async def start_session(session_id: str):
     active.started_at = datetime.now()
     active.capture_started_at = active.started_at
     active.capture_restarts = 0
+    active.device_names = await asyncio.to_thread(
+        _device_names_for_indices, active.device_index
+    )
+    active._last_device_check = time.time()
+    active._device_missing_checks = 0
     active.status = SessionStatus.RECORDING
 
     await asyncio.sleep(0.5)
@@ -900,6 +910,46 @@ def _is_chunk_inactive(text: str, word_threshold: int) -> bool:
 
 
 _MAX_CAPTURE_RESTARTS = 3
+_DEVICE_CHECK_INTERVAL_SECONDS = 10
+# Consecutive failed presence checks before stopping, to ride out brief
+# Bluetooth dropouts without ending the meeting.
+_DEVICE_MISSING_CHECKS_TO_STOP = 2
+
+
+def _audio_devices_by_name() -> Optional[dict[str, int]]:
+    """Map currently-attached audio device names to indices, or None if the
+    device list could not be read (don't treat a listing failure as a
+    disconnect)."""
+    try:
+        devices = ffmpeg_list_avfoundation_devices()
+    except Exception:
+        return None
+    return {d.name: d.index for d in devices if d.kind == "audio"}
+
+
+def _device_names_for_indices(device_index: str) -> list[str]:
+    """Resolve an ffmpeg device-index string like "3,4" to device names."""
+    by_name = _audio_devices_by_name()
+    if by_name is None:
+        return []
+    by_index = {index: name for name, index in by_name.items()}
+    names: list[str] = []
+    for part in device_index.split(","):
+        try:
+            name = by_index.get(int(part.strip()))
+        except ValueError:
+            continue
+        if name:
+            names.append(name)
+    return names
+
+
+def _missing_device_names(device_names: list[str]) -> list[str]:
+    """Which of the given devices are no longer attached (empty on listing failure)."""
+    by_name = _audio_devices_by_name()
+    if by_name is None:
+        return []
+    return [name for name in device_names if name not in by_name]
 
 
 def _shutdown_ffmpeg(process: subprocess.Popen, *, sigint_timeout: float = 10.0) -> None:
@@ -1026,6 +1076,28 @@ async def _stop_recording_with_error(
     )
 
 
+async def _finish_recording(active: ActiveSession, *, reason: str, message: str) -> None:
+    """Gracefully end a recording (auto-stop), broadcast why, and run the final summary."""
+    print(f"[server] Auto-stopping session {active.session_id}: {message}")
+    if active.ffmpeg_process:
+        await asyncio.to_thread(_shutdown_ffmpeg, active.ffmpeg_process)
+        active.ffmpeg_process = None
+    active.stopped_at = datetime.now()
+    active.status = SessionStatus.STOPPED
+    await broadcast_to_session(
+        active.session_id,
+        {
+            "type": "session_status",
+            "data": {
+                "status": "stopped",
+                "reason": reason,
+                "message": message,
+            },
+        },
+    )
+    await _run_summary(active, force=True)
+
+
 async def _recover_stalled_capture(active: ActiveSession) -> None:
     """Kill a wedged ffmpeg capture and restart it, or stop the session.
 
@@ -1063,6 +1135,28 @@ async def _recover_stalled_capture(active: ActiveSession) -> None:
             )
         )
         return
+
+    # Re-resolve devices by name: avfoundation indices may have shifted since
+    # the recording started, and a vanished device means the meeting is over,
+    # not that we should capture from whatever inherited its index. If the
+    # device list itself can't be read, fall through and retry the old indices.
+    if active.device_names:
+        by_name = await asyncio.to_thread(_audio_devices_by_name)
+        if by_name is not None:
+            missing = [n for n in active.device_names if n not in by_name]
+            if missing:
+                await _finish_recording(
+                    active,
+                    reason="device_disconnected",
+                    message=(
+                        "Session auto-stopped: recording stalled and audio "
+                        f"device(s) are no longer connected ({', '.join(missing)})."
+                    ),
+                )
+                return
+            active.device_index = ",".join(
+                str(by_name[n]) for n in active.device_names
+            )
 
     active.capture_restarts += 1
     next_segment = _next_segment_number(
@@ -1136,6 +1230,38 @@ async def _process_chunks(active: ActiveSession) -> None:
                     )
                     return
 
+            # Treat a configured audio device disconnecting (e.g. taking off a
+            # headset) as the meeting being over. Debounced across consecutive
+            # checks so a brief Bluetooth dropout doesn't end the session.
+            if (
+                active.device_names
+                and time.time() - active._last_device_check
+                >= _DEVICE_CHECK_INTERVAL_SECONDS
+            ):
+                active._last_device_check = time.time()
+                missing = await asyncio.to_thread(
+                    _missing_device_names, active.device_names
+                )
+                if missing:
+                    active._device_missing_checks += 1
+                    print(
+                        f"[server] Audio device(s) missing for session "
+                        f"{active.session_id}: {', '.join(missing)} "
+                        f"(check {active._device_missing_checks}/{_DEVICE_MISSING_CHECKS_TO_STOP})"
+                    )
+                    if active._device_missing_checks >= _DEVICE_MISSING_CHECKS_TO_STOP:
+                        await _finish_recording(
+                            active,
+                            reason="device_disconnected",
+                            message=(
+                                f"Session auto-stopped: audio device disconnected "
+                                f"({', '.join(missing)})."
+                            ),
+                        )
+                        return
+                else:
+                    active._device_missing_checks = 0
+
             # Detect a wedged capture: ffmpeg still running but no chunk file
             # has been touched for well over a chunk interval (e.g. an
             # avfoundation input went away mid-recording). Restart the capture
@@ -1160,24 +1286,11 @@ async def _process_chunks(active: ActiveSession) -> None:
                 elapsed = (datetime.now() - active.started_at).total_seconds()
                 if elapsed >= active.max_duration_seconds:
                     hours = active.max_duration_seconds / 3600
-                    print(f"[server] Auto-stopping session {active.session_id}: {hours}h limit reached")
-                    if active.ffmpeg_process:
-                        await asyncio.to_thread(_shutdown_ffmpeg, active.ffmpeg_process)
-                        active.ffmpeg_process = None
-                    active.stopped_at = datetime.now()
-                    active.status = SessionStatus.STOPPED
-                    await broadcast_to_session(
-                        active.session_id,
-                        {
-                            "type": "session_status",
-                            "data": {
-                                "status": "stopped",
-                                "reason": "max_duration_reached",
-                                "message": f"Session auto-stopped after {hours:.0f}h limit.",
-                            },
-                        },
+                    await _finish_recording(
+                        active,
+                        reason="max_duration_reached",
+                        message=f"Session auto-stopped after {hours:.0f}h limit.",
                     )
-                    await _run_summary(active, force=True)
                     return
 
             # Look for next chunk
@@ -1298,30 +1411,14 @@ async def _process_chunks(active: ActiveSession) -> None:
                     )
 
                     if active._consecutive_inactive_chunks >= active.inactivity_timeout_chunks:
-                        print(
-                            f"[server] Auto-stopping session {active.session_id}: "
-                            f"meeting appears ended ({inactive_minutes:.0f}m of inactivity)"
+                        await _finish_recording(
+                            active,
+                            reason="meeting_ended_inactivity",
+                            message=(
+                                f"Session auto-stopped: no meaningful conversation "
+                                f"detected for {inactive_minutes:.0f} minutes."
+                            ),
                         )
-                        if active.ffmpeg_process:
-                            await asyncio.to_thread(_shutdown_ffmpeg, active.ffmpeg_process)
-                            active.ffmpeg_process = None
-                        active.stopped_at = datetime.now()
-                        active.status = SessionStatus.STOPPED
-                        await broadcast_to_session(
-                            active.session_id,
-                            {
-                                "type": "session_status",
-                                "data": {
-                                    "status": "stopped",
-                                    "reason": "meeting_ended_inactivity",
-                                    "message": (
-                                        f"Session auto-stopped: no meaningful conversation "
-                                        f"detected for {inactive_minutes:.0f} minutes."
-                                    ),
-                                },
-                            },
-                        )
-                        await _run_summary(active, force=True)
                         return
                 else:
                     # Reset counter on any meaningful conversation
