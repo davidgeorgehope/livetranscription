@@ -120,7 +120,7 @@ class ActiveSession:
         self.transcribe_model: str = "gemini-3.5-flash"
         self.coaching_model: str = "gemini-3.5-flash"
         self.max_duration_seconds: int = 8 * 3600  # Default 8 hours
-        self.inactivity_timeout_chunks: int = 10  # Consecutive inactive chunks before auto-stop
+        self.inactivity_timeout_chunks: int = 4  # Consecutive inactive chunks before auto-stop (2m at 30s chunks)
         self.inactivity_word_threshold: int = 5  # Words below which a chunk is "inactive"
         self._consecutive_inactive_chunks: int = 0
         self.capture_started_at: Optional[datetime] = None
