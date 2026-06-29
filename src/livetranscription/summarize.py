@@ -11,6 +11,22 @@ Task:
 - Update the running summary so it reflects everything covered so far.
 - Prefer concise, factual bullet points.
 - If the new transcript adds nothing, keep the summary effectively unchanged.
+- Never drop a decision or action item that was in the previous summary unless the
+  new transcript explicitly resolves, completes, or contradicts it. Carry them forward.
+
+Action items — capture these aggressively:
+- In real meetings, tasks are almost never announced as "action item:". They are
+  phrased conversationally: "do me a favor and...", "can you work with X to...",
+  "why don't you...", "you should...", "give her/him a...", "let's get...",
+  "I'll...", "we need to...", "make sure...". Treat all of these as action items.
+- Capture every commitment, request, and assignment, even small ones. Missing a
+  real action item is far worse than including a borderline one.
+- Attribute each item to an owner. Speaker diarization labels (e.g. "Speaker 1")
+  are unreliable and may swap mid-transcript; prefer names used in direct address
+  ("...David, can you...") and surrounding context over the labels.
+- Include the deliverable and any stated deadline ("today", "by Friday",
+  "before the meeting with X").
+- If an item is completed during the meeting itself, keep it listed and mark it done.
 
 Output format (Markdown):
 ## Summary
@@ -20,7 +36,7 @@ Output format (Markdown):
 - ...
 
 ## Action items
-- ...
+- **Owner** — task (deadline if stated)
 
 ## Open questions
 - ...
@@ -64,7 +80,7 @@ def update_running_summary(
                 contents=full_prompt,
                 config=types.GenerateContentConfig(
                     temperature=temperature,
-                    max_output_tokens=2000,
+                    max_output_tokens=4000,
                 ),
             )
             content = response.text
