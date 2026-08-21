@@ -3,10 +3,10 @@ import AVFoundation
 import Accelerate
 
 /// Mixes Core Audio process-tap system audio with optional microphone, then
-/// emits 16 kHz mono WAV chunks (~8s, speech-gated).
+/// emits live 16 kHz mono PCM16 frames for Grok Voice STT.
 @available(macOS 14.2, *)
 final class DualCapture {
-    var onChunk: ((Data) -> Void)?
+    var onPCM16: ((Data) -> Void)?
     var onLevel: ((Float) -> Void)?
 
     private let tap = ProcessTapCapture()
@@ -18,8 +18,7 @@ final class DualCapture {
     private var usingMic = false
     private var running = false
     private let targetRate: Double = 16_000
-    private let chunkSeconds: Double = 8
-    private var lastEmit = Date.distantPast
+    private let frameSamples = 1_600 // 100ms at 16 kHz
 
     func start(includeMic: Bool) throws {
         stop()
@@ -138,9 +137,8 @@ final class DualCapture {
             let level = min(max(peak * 2.4, 0), 1)
             DispatchQueue.main.async { [weak self] in self?.onLevel?(level) }
 
-            let target = Int(targetRate * chunkSeconds)
-            if mixBuf.count >= target {
-                emitLocked(count: target)
+            if mixBuf.count >= frameSamples {
+                emitLocked(count: frameSamples)
             }
         }
     }
@@ -148,15 +146,13 @@ final class DualCapture {
     private func emitLocked(count: Int) {
         let slice = Array(mixBuf.prefix(count))
         mixBuf.removeFirst(count)
-        var rms: Float = 0
-        vDSP_rmsqv(slice, 1, &rms, vDSP_Length(slice.count))
-        // Skip near-silence so we don't burn Whisper on dead air.
-        guard rms > 0.008 else { return }
-        if Date().timeIntervalSince(lastEmit) < 2 { return }
-        lastEmit = Date()
-        if let wav = WAVWriter.mono16k(pcm: slice) {
-            DispatchQueue.main.async { [weak self] in self?.onChunk?(wav) }
+        var ints = [Int16](repeating: 0, count: slice.count)
+        for i in 0..<slice.count {
+            let s = max(-1, min(1, slice[i]))
+            ints[i] = Int16(s * Float(Int16.max))
         }
+        let data = ints.withUnsafeBytes { Data($0) }
+        DispatchQueue.main.async { [weak self] in self?.onPCM16?(data) }
     }
 
     private func resample(_ input: [Float], from: Double, to: Double) -> [Float] {
@@ -172,42 +168,5 @@ final class DualCapture {
             output[i] = input[min(i0, input.count - 1)] * (1 - frac) + input[i1] * frac
         }
         return output
-    }
-}
-
-enum WAVWriter {
-    static func mono16k(pcm: [Float]) -> Data? {
-        guard !pcm.isEmpty else { return nil }
-        var ints = [Int16](repeating: 0, count: pcm.count)
-        for i in 0..<pcm.count {
-            let s = max(-1, min(1, pcm[i]))
-            ints[i] = Int16(s * Float(Int16.max))
-        }
-        let dataSize = UInt32(ints.count * 2)
-        var data = Data()
-        func append(_ s: String) { data.append(contentsOf: s.utf8) }
-        func append32(_ v: UInt32) {
-            var le = v.littleEndian
-            data.append(Data(bytes: &le, count: 4))
-        }
-        func append16(_ v: UInt16) {
-            var le = v.littleEndian
-            data.append(Data(bytes: &le, count: 2))
-        }
-        append("RIFF")
-        append32(36 + dataSize)
-        append("WAVE")
-        append("fmt ")
-        append32(16)
-        append16(1)
-        append16(1)
-        append32(16_000)
-        append32(16_000 * 2)
-        append16(2)
-        append16(16)
-        append("data")
-        append32(dataSize)
-        ints.withUnsafeBytes { data.append(contentsOf: $0) }
-        return data
     }
 }

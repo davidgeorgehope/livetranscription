@@ -8,8 +8,8 @@ Purpose: hear a customer question and put a **short, speakable answer** on scree
 
 - Taps system audio via `CATapDescription` + private aggregate device (macOS 14.2+)
 - Optional microphone mix if you want the room as well
-- 8s speech-gated chunks → OpenAI `gpt-4o-mini-transcribe`
-- Question detector → `gpt-4.1-mini` answer card
+- Live Grok Voice STT (`wss://api.x.ai/v1/stt`, 16 kHz PCM)
+- Question detector → Grok answer card (`grok-4.3`)
 - Paste product facts in Settings so it doesn't invent prices/SLAs
 
 ## Build / run
@@ -24,7 +24,7 @@ First Listen: grant **Audio Capture / System Audio Recording** (and Microphone i
 
 Cmd+L starts/stops listening.
 
-API key is stored in Keychain (`com.davidgeorgehope.cue`). It will also pick up `OPENAI_API_KEY` from the environment on first launch.
+Needs an **xAI API key** (console.x.ai). Stored in Keychain service `com.davidgeorgehope.cue`, account `xai`. Also picks up `XAI_API_KEY` from the environment on first launch.
 
 ## Not this app
 

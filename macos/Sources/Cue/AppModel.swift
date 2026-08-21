@@ -15,6 +15,7 @@ final class AppModel: ObservableObject {
     @Published var phase: Phase = .idle
     @Published var statusLine = "Idle"
     @Published var level: Float = 0
+    @Published var livePartial = ""
     @Published var transcript: [TranscriptLine] = []
     @Published var cues: [AnswerCard] = []
     @Published var contextNotes = ""
@@ -25,20 +26,25 @@ final class AppModel: ObservableObject {
 
     private let keychain = KeychainStore(service: "com.davidgeorgehope.cue")
     private let capture = DualCapture()
-    private let whisper = WhisperClient()
+    private let stt = GrokSTTClient()
     private let answers = AnswerEngine()
     private let questions = QuestionDetector()
-    private var chunkTask: Task<Void, Never>?
     private var recentWindow = ""
+    private var lastAnswered = ""
+    private var lastAnswerAt = Date.distantPast
 
     init() {
-        if let stored = keychain.read(account: "openai") {
+        if let stored = keychain.read(account: "xai") {
             apiKeyField = stored
-        } else if let env = ProcessInfo.processInfo.environment["OPENAI_API_KEY"], !env.isEmpty {
+        } else if let env = ProcessInfo.processInfo.environment["XAI_API_KEY"], !env.isEmpty {
             apiKeyField = env
+        } else if let stored = keychain.read(account: "openai") {
+            // leftover from the Whisper prototype; don't auto-use it
+            _ = stored
         }
         contextNotes = UserDefaults.standard.string(forKey: "cue.context") ?? ""
         includeMic = UserDefaults.standard.object(forKey: "cue.includeMic") as? Bool ?? true
+        wireSTT()
     }
 
     var hasKey: Bool { !apiKeyField.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -46,9 +52,9 @@ final class AppModel: ObservableObject {
     func saveSettings() {
         let trimmed = apiKeyField.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            keychain.delete(account: "openai")
+            keychain.delete(account: "xai")
         } else {
-            keychain.write(account: "openai", value: trimmed)
+            keychain.write(account: "xai", value: trimmed)
         }
         UserDefaults.standard.set(contextNotes, forKey: "cue.context")
         UserDefaults.standard.set(includeMic, forKey: "cue.includeMic")
@@ -66,26 +72,25 @@ final class AppModel: ObservableObject {
     func start() {
         saveSettings()
         guard hasKey else {
-            errorMessage = "Add an OpenAI API key in Settings first."
+            errorMessage = "Add an xAI API key in Settings first."
             phase = .error
             return
         }
         errorMessage = nil
+        livePartial = ""
         phase = .listening
-        statusLine = "Listening for customer questions…"
+        statusLine = "Connecting Grok Voice STT…"
         capture.onLevel = { [weak self] level in
-            Task { @MainActor in
-                self?.level = level
-            }
+            Task { @MainActor in self?.level = level }
         }
-        capture.onChunk = { [weak self] data in
-            Task { @MainActor in
-                self?.handleChunk(data)
-            }
+        capture.onPCM16 = { [weak self] data in
+            self?.stt.sendPCM16(data)
         }
+        stt.start(apiKey: apiKeyField, keyterms: keyterms(from: contextNotes))
         do {
             try capture.start(includeMic: includeMic)
         } catch {
+            stt.stop()
             phase = .error
             errorMessage = error.localizedDescription
             statusLine = "Capture failed"
@@ -94,9 +99,10 @@ final class AppModel: ObservableObject {
 
     func stop() {
         capture.stop()
-        chunkTask?.cancel()
+        stt.stop()
         phase = .idle
         statusLine = "Idle"
+        livePartial = ""
         level = 0
     }
 
@@ -104,22 +110,28 @@ final class AppModel: ObservableObject {
         cues.removeAll { $0.id == card.id }
     }
 
-    private func handleChunk(_ wav: Data) {
-        guard phase == .listening, hasKey else { return }
-        chunkTask = Task { [weak self] in
-            guard let self else { return }
-            do {
-                let text = try await whisper.transcribe(wav: wav, apiKey: apiKeyField)
-                guard !Task.isCancelled else { return }
-                await MainActor.run {
-                    self.ingest(text)
+    private func wireSTT() {
+        stt.onPartial = { [weak self] text in
+            Task { @MainActor in
+                self?.livePartial = text
+            }
+        }
+        stt.onFinal = { [weak self] text in
+            Task { @MainActor in
+                self?.ingest(text)
+            }
+        }
+        stt.onStatus = { [weak self] text in
+            Task { @MainActor in
+                if self?.phase == .listening {
+                    self?.statusLine = text
                 }
-            } catch {
-                await MainActor.run {
-                    if self.phase == .listening {
-                        self.statusLine = "STT hiccup: \(error.localizedDescription)"
-                    }
-                }
+            }
+        }
+        stt.onError = { [weak self] text in
+            Task { @MainActor in
+                guard let self, self.phase == .listening else { return }
+                self.statusLine = "STT: \(text)"
             }
         }
     }
@@ -127,6 +139,7 @@ final class AppModel: ObservableObject {
     private func ingest(_ raw: String) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, text.lowercased() != "(silence)" else { return }
+        livePartial = ""
 
         let line = TranscriptLine(text: text, at: Date())
         transcript.append(line)
@@ -138,11 +151,15 @@ final class AppModel: ObservableObject {
             .joined(separator: " ")
 
         if let question = questions.detect(in: text, recent: recentWindow) {
-            lastQuestion = question
-            statusLine = "Customer asked — drafting…"
-            Task {
-                await draftAnswer(for: question)
+            let normalized = question.lowercased()
+            if normalized == lastAnswered, Date().timeIntervalSince(lastAnswerAt) < 20 {
+                return
             }
+            lastQuestion = question
+            lastAnswered = normalized
+            lastAnswerAt = Date()
+            statusLine = "Customer asked — drafting…"
+            Task { await draftAnswer(for: question) }
         }
     }
 
@@ -165,6 +182,13 @@ final class AppModel: ObservableObject {
         } catch {
             statusLine = "Answer failed: \(error.localizedDescription)"
         }
+    }
+
+    private func keyterms(from notes: String) -> [String] {
+        notes
+            .split(whereSeparator: { ",\n;".contains($0) })
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.count >= 3 && $0.count <= 50 }
     }
 }
 

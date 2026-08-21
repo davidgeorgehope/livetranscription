@@ -2,7 +2,7 @@
 
 Two stacks live here:
 
-- **Cue (current):** native macOS app in `macos/`. Core Audio process tap, no BlackHole. Job is to hear a customer question and flash a short answer you can say immediately. See `macos/README.md`.
+- **Cue (current):** native macOS app in `macos/`. Core Audio process tap, no BlackHole. Live Grok Voice STT + Grok answers. See `macos/README.md`.
 - **v1 (Python + BlackHole):** terminal/web coaching app below. Kept as reference.
 
 See `SPEC.md` for the original MVP spec and the old BlackHole routing notes.

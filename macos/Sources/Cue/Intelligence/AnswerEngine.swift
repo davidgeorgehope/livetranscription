@@ -26,7 +26,7 @@ struct AnswerEngine {
         """
 
         let payload: [String: Any] = [
-            "model": "gpt-4.1-mini",
+            "model": "grok-4.3",
             "temperature": 0.2,
             "max_tokens": 180,
             "messages": [
@@ -35,7 +35,7 @@ struct AnswerEngine {
             ]
         ]
         let body = try JSONSerialization.data(withJSONObject: payload)
-        var request = URLRequest(url: URL(string: "https://api.openai.com/v1/chat/completions")!)
+        var request = URLRequest(url: URL(string: "https://api.x.ai/v1/chat/completions")!)
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

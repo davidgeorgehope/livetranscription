@@ -64,7 +64,7 @@ struct ContentView: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 8) {
-                        if model.transcript.isEmpty {
+                        if model.transcript.isEmpty && model.livePartial.isEmpty {
                             Text(model.phase == .listening
                                  ? "Waiting for speech…"
                                  : "Hit Listen. Cue taps system audio natively — no BlackHole.")
@@ -81,11 +81,19 @@ struct ContentView: View {
                             }
                             .id(line.id)
                         }
+                        if !model.livePartial.isEmpty {
+                            Text(model.livePartial)
+                                .italic()
+                                .foregroundStyle(.purple.opacity(0.85))
+                                .id("partial")
+                        }
                     }
                     .padding(.trailing, 8)
                 }
                 .onChange(of: model.transcript.count) { _, _ in
-                    if let last = model.transcript.last {
+                    if !model.livePartial.isEmpty {
+                        proxy.scrollTo("partial", anchor: .bottom)
+                    } else if let last = model.transcript.last {
                         proxy.scrollTo(last.id, anchor: .bottom)
                     }
                 }
@@ -193,9 +201,9 @@ struct SettingsView: View {
             Text("System audio (Zoom/Meet/browser) uses a Core Audio process tap. No BlackHole, no Multi-Output Device.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("OpenAI API key")
+            Text("xAI API key")
                 .font(.headline)
-            SecureField("sk-…", text: $model.apiKeyField)
+            SecureField("xai-…", text: $model.apiKeyField)
                 .textFieldStyle(.roundedBorder)
             Text("Call context / facts Cue is allowed to use")
                 .font(.headline)
