@@ -26,7 +26,7 @@ struct AnswerEngine {
         """
 
         let payload: [String: Any] = [
-            "model": "grok-4.3",
+            "model": "grok-4.6",
             "temperature": 0.2,
             "max_tokens": 180,
             "messages": [

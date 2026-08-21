@@ -9,7 +9,7 @@ Purpose: hear a customer question and put a **short, speakable answer** on scree
 - Taps system audio via `CATapDescription` + private aggregate device (macOS 14.2+)
 - Optional microphone mix if you want the room as well
 - Live Grok Voice STT (`wss://api.x.ai/v1/stt`, 16 kHz PCM)
-- Question detector → Grok answer card (`grok-4.3`)
+- Question detector → Grok answer card (`grok-4.6`)
 - Paste product facts in Settings so it doesn't invent prices/SLAs
 
 ## Build / run
