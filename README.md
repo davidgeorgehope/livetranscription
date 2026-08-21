@@ -1,8 +1,11 @@
 # livetranscription
 
-Local macOS terminal app that captures audio, transcribes with OpenAI Whisper (chunked), and produces a rolling 5‑minute summary.
+Two stacks live here:
 
-See `SPEC.md` for the full MVP spec and macOS BlackHole routing notes.
+- **Cue (current):** native macOS app in `macos/`. Core Audio process tap, no BlackHole. Job is to hear a customer question and flash a short answer you can say immediately. See `macos/README.md`.
+- **v1 (Python + BlackHole):** terminal/web coaching app below. Kept as reference.
+
+See `SPEC.md` for the original MVP spec and the old BlackHole routing notes.
 
 ## Requirements
 - macOS

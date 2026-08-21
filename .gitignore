@@ -22,3 +22,8 @@ secrets/
 *.key
 *.p12
 *.pfx
+
+# Native Cue app
+macos/.build/
+macos/.swiftpm/
+macos/Cue.app/
