@@ -44,4 +44,6 @@ cat > "$contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+codesign --force --deep --sign - "$app"
+
 echo "Built $PWD/$app"

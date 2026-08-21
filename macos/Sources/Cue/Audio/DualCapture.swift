@@ -10,7 +10,7 @@ final class DualCapture {
     var onLevel: ((Float) -> Void)?
 
     private let tap = ProcessTapCapture()
-    private let engine = AVAudioEngine()
+    private var engine: AVAudioEngine?
     private let lock = NSLock()
     private var systemBuf: [Float] = []
     private var micBuf: [Float] = []
@@ -38,8 +38,11 @@ final class DualCapture {
     func stop() {
         running = false
         tap.stop()
-        if engine.isRunning { engine.stop() }
-        engine.inputNode.removeTap(onBus: 0)
+        if let engine {
+            if engine.isRunning { engine.stop() }
+            engine.inputNode.removeTap(onBus: 0)
+        }
+        engine = nil
         lock.lock()
         systemBuf.removeAll(keepingCapacity: true)
         micBuf.removeAll(keepingCapacity: true)
@@ -51,19 +54,12 @@ final class DualCapture {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             break
-        case .notDetermined:
-            let ok = DispatchSemaphore(value: 0)
-            var granted = false
-            AVCaptureDevice.requestAccess(for: .audio) { yes in
-                granted = yes
-                ok.signal()
-            }
-            _ = ok.wait(timeout: .now() + 20)
-            if !granted { throw CaptureError.micPermission }
         default:
             throw CaptureError.micPermission
         }
 
+        let engine = AVAudioEngine()
+        self.engine = engine
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0 else {

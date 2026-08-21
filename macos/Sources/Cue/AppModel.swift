@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import Combine
+import AVFoundation
 
 @available(macOS 14.2, *)
 @MainActor
@@ -87,6 +88,22 @@ final class AppModel: ObservableObject {
             self?.stt.sendPCM16(data)
         }
         stt.start(apiKey: apiKeyField, keyterms: keyterms(from: contextNotes))
+        Task { [weak self] in
+            await self?.beginCapture()
+        }
+    }
+
+    private func beginCapture() async {
+        if includeMic {
+            let granted = await requestMicIfNeeded()
+            if !granted {
+                stt.stop()
+                phase = .error
+                errorMessage = CaptureError.micPermission.localizedDescription
+                statusLine = "Capture failed"
+                return
+            }
+        }
         do {
             try capture.start(includeMic: includeMic)
         } catch {
@@ -94,6 +111,17 @@ final class AppModel: ObservableObject {
             phase = .error
             errorMessage = error.localizedDescription
             statusLine = "Capture failed"
+        }
+    }
+
+    private func requestMicIfNeeded() async -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            return true
+        case .notDetermined:
+            return await AVCaptureDevice.requestAccess(for: .audio)
+        default:
+            return false
         }
     }
 
