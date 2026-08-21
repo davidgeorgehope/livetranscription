@@ -39,7 +39,7 @@ struct ContentView: View {
                 Button(model.phase == .listening ? "Stop" : "Listen") {
                     model.toggleListen()
                 }
-                .keyboardShortcut(.space, modifiers: [.command])
+                .keyboardShortcut("l", modifiers: [.command])
                 .buttonStyle(.borderedProminent)
                 .tint(model.phase == .listening ? .red : .purple)
             }

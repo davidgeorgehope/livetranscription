@@ -22,7 +22,7 @@ open Cue.app
 
 First Listen: grant **Audio Capture / System Audio Recording** (and Microphone if you enabled it).
 
-Cmd+Space starts/stops listening.
+Cmd+L starts/stops listening.
 
 API key is stored in Keychain (`com.davidgeorgehope.cue`). It will also pick up `OPENAI_API_KEY` from the environment on first launch.
 
