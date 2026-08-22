@@ -75,6 +75,9 @@ final class AppModel: ObservableObject {
     }
 
     func start() {
+        if apiKeyField.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            loadKey()
+        }
         saveSettings()
         guard hasKey else {
             errorMessage = "Add an xAI API key in Settings first."
