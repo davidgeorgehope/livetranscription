@@ -35,17 +35,20 @@ final class AppModel: ObservableObject {
     private var lastAnswerAt = Date.distantPast
 
     init() {
+        contextNotes = UserDefaults.standard.string(forKey: "cue.context") ?? ""
+        includeMic = UserDefaults.standard.object(forKey: "cue.includeMic") as? Bool ?? true
+        wireSTT()
+        Task { @MainActor [weak self] in
+            self?.loadKey()
+        }
+    }
+
+    func loadKey() {
         if let stored = keychain.read(account: "xai") {
             apiKeyField = stored
         } else if let env = ProcessInfo.processInfo.environment["XAI_API_KEY"], !env.isEmpty {
             apiKeyField = env
-        } else if let stored = keychain.read(account: "openai") {
-            // leftover from the Whisper prototype; don't auto-use it
-            _ = stored
         }
-        contextNotes = UserDefaults.standard.string(forKey: "cue.context") ?? ""
-        includeMic = UserDefaults.standard.object(forKey: "cue.includeMic") as? Bool ?? true
-        wireSTT()
     }
 
     var hasKey: Bool { !apiKeyField.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
