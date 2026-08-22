@@ -35,7 +35,11 @@ final class AppModel: ObservableObject {
     private var lastAnswerAt = Date.distantPast
 
     init() {
-        contextNotes = UserDefaults.standard.string(forKey: "cue.context") ?? ""
+        if let envNotes = ProcessInfo.processInfo.environment["CUE_CONTEXT"], !envNotes.isEmpty {
+            contextNotes = envNotes
+        } else {
+            contextNotes = UserDefaults.standard.string(forKey: "cue.context") ?? ""
+        }
         includeMic = UserDefaults.standard.object(forKey: "cue.includeMic") as? Bool ?? true
         wireSTT()
         Task { @MainActor [weak self] in
@@ -210,6 +214,7 @@ final class AppModel: ObservableObject {
             .joined(separator: " ")
 
         if let question = questions.detect(in: text, recent: recentWindow) {
+            FileHandle.standardError.write(Data("cue: question \(question)\n".utf8))
             let normalized = question.lowercased()
             if normalized == lastAnswered, Date().timeIntervalSince(lastAnswerAt) < 20 {
                 return
