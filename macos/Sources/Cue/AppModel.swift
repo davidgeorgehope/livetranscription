@@ -40,14 +40,21 @@ final class AppModel: ObservableObject {
         wireSTT()
         Task { @MainActor [weak self] in
             self?.loadKey()
+            if ProcessInfo.processInfo.environment["CUE_AUTOSTART"] == "1" {
+                FileHandle.standardError.write(Data("cue: autostart requested hasKey=\(self?.hasKey ?? false)\n".utf8))
+                self?.includeMic = ProcessInfo.processInfo.environment["CUE_MIC_ONLY"] == "1"
+                self?.start()
+            }
         }
     }
 
     func loadKey() {
+        if let env = ProcessInfo.processInfo.environment["XAI_API_KEY"], !env.isEmpty {
+            apiKeyField = env
+            return
+        }
         if let stored = keychain.read(account: "xai") {
             apiKeyField = stored
-        } else if let env = ProcessInfo.processInfo.environment["XAI_API_KEY"], !env.isEmpty {
-            apiKeyField = env
         }
     }
 
@@ -55,10 +62,11 @@ final class AppModel: ObservableObject {
 
     func saveSettings() {
         let trimmed = apiKeyField.trimmingCharacters(in: .whitespacesAndNewlines)
+        let envKey = ProcessInfo.processInfo.environment["XAI_API_KEY"] ?? ""
         if trimmed.isEmpty {
             // Never delete a stored xAI key from an empty field. Settings can
             // appear before loadKey() finishes, and that already wiped the item.
-        } else {
+        } else if envKey.isEmpty {
             keychain.write(account: "xai", value: trimmed)
         }
         UserDefaults.standard.set(contextNotes, forKey: "cue.context")
@@ -72,6 +80,11 @@ final class AppModel: ObservableObject {
         default:
             start()
         }
+    }
+
+    func menuToggleListen() {
+        FileHandle.standardError.write(Data("cue: menuToggleListen phase=\(phase.rawValue) hasKey=\(hasKey)\n".utf8))
+        toggleListen()
     }
 
     func start() {
@@ -94,30 +107,38 @@ final class AppModel: ObservableObject {
         capture.onPCM16 = { [weak self] data in
             self?.stt.sendPCM16(data)
         }
+        FileHandle.standardError.write(Data("cue: start() connecting STT\n".utf8))
         stt.start(apiKey: apiKeyField, keyterms: keyterms(from: contextNotes))
-        Task { [weak self] in
+        Task.detached { [weak self] in
             await self?.beginCapture()
         }
     }
 
     private func beginCapture() async {
-        if includeMic {
+        let wantMic = await MainActor.run { includeMic }
+        if wantMic {
             let granted = await requestMicIfNeeded()
             if !granted {
-                stt.stop()
-                phase = .error
-                errorMessage = CaptureError.micPermission.localizedDescription
-                statusLine = "Capture failed"
+                await MainActor.run {
+                    stt.stop()
+                    phase = .error
+                    errorMessage = CaptureError.micPermission.localizedDescription
+                    statusLine = "Capture failed"
+                }
                 return
             }
         }
         do {
-            try capture.start(includeMic: includeMic)
+            FileHandle.standardError.write(Data("cue: starting capture off-main\n".utf8))
+            try capture.start(includeMic: wantMic)
+            FileHandle.standardError.write(Data("cue: capture started\n".utf8))
         } catch {
-            stt.stop()
-            phase = .error
-            errorMessage = error.localizedDescription
-            statusLine = "Capture failed"
+            await MainActor.run {
+                stt.stop()
+                phase = .error
+                errorMessage = error.localizedDescription
+                statusLine = "Capture failed"
+            }
         }
     }
 
@@ -147,24 +168,27 @@ final class AppModel: ObservableObject {
 
     private func wireSTT() {
         stt.onPartial = { [weak self] text in
-            Task { @MainActor in
-                self?.livePartial = text
+            DispatchQueue.main.async {
+                guard let self else { return }
+                FileHandle.standardError.write(Data("cue: partial \(text)\n".utf8))
+                self.livePartial = text
             }
         }
         stt.onFinal = { [weak self] text in
-            Task { @MainActor in
+            DispatchQueue.main.async {
+                FileHandle.standardError.write(Data("cue: final \(text)\n".utf8))
                 self?.ingest(text)
             }
         }
         stt.onStatus = { [weak self] text in
-            Task { @MainActor in
+            DispatchQueue.main.async {
                 if self?.phase == .listening {
                     self?.statusLine = text
                 }
             }
         }
         stt.onError = { [weak self] text in
-            Task { @MainActor in
+            DispatchQueue.main.async {
                 guard let self, self.phase == .listening else { return }
                 self.statusLine = "STT: \(text)"
             }

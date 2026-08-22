@@ -49,7 +49,7 @@ final class GrokSTTClient: NSObject, URLSessionWebSocketDelegate {
         config.waitsForConnectivity = false
         config.timeoutIntervalForRequest = 20
         config.timeoutIntervalForResource = 60
-        let session = URLSession(configuration: config, delegate: self, delegateQueue: .main)
+        let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
         self.session = session
         let task = session.webSocketTask(with: request)
         self.task = task
@@ -157,10 +157,9 @@ final class GrokSTTClient: NSObject, URLSessionWebSocketDelegate {
             guard !spoken.isEmpty else { return }
             let isFinal = obj["is_final"] as? Bool ?? false
             let speechFinal = obj["speech_final"] as? Bool ?? false
+            onPartial?(spoken)
             if speechFinal || isFinal {
                 onFinal?(spoken)
-            } else {
-                onPartial?(spoken)
             }
         case "transcript.done":
             if let spoken = obj["text"] as? String, !spoken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

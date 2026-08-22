@@ -28,6 +28,13 @@ final class DualCapture {
         tap.onPCM = { [weak self] ptr, frames, rate in
             self?.ingest(ptr, frames: frames, sourceRate: rate, system: true)
         }
+        if ProcessInfo.processInfo.environment["CUE_MIC_ONLY"] == "1" {
+            FileHandle.standardError.write(Data("cue: mic-only capture\n".utf8))
+            if includeMic {
+                try startMic()
+            }
+            return
+        }
         try tap.start()
 
         if includeMic {
