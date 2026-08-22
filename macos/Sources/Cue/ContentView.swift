@@ -42,13 +42,15 @@ struct ContentView: View {
                 .keyboardShortcut("l", modifiers: [.command])
                 .buttonStyle(.borderedProminent)
                 .tint(model.phase == .listening ? .red : .purple)
+                .accessibilityLabel(model.phase == .listening ? "Stop" : "Listen")
+                .accessibilityIdentifier("cue-listen")
             }
         }
         .sheet(isPresented: $showSettings) {
             SettingsView()
                 .environmentObject(model)
         }
-        .onAppear { model.saveSettings() }
+        .onAppear { model.loadKey() }
     }
 
     private var transcriptPane: some View {
@@ -133,10 +135,21 @@ struct ContentView: View {
     }
 
     private func header(_ title: String) -> some View {
-        Text(title)
-            .font(.system(size: 11, weight: .bold, design: .rounded))
-            .tracking(1.6)
-            .foregroundStyle(.secondary)
+        HStack {
+            Text(title)
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .tracking(1.6)
+                .foregroundStyle(.secondary)
+            Spacer()
+            if title == "LIVE" {
+                Button(model.phase == .listening ? "Stop" : "Listen") {
+                    model.toggleListen()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(model.phase == .listening ? .red : .purple)
+                .accessibilityLabel(model.phase == .listening ? "Stop" : "Listen")
+            }
+        }
     }
 }
 

@@ -56,7 +56,8 @@ final class AppModel: ObservableObject {
     func saveSettings() {
         let trimmed = apiKeyField.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            keychain.delete(account: "xai")
+            // Never delete a stored xAI key from an empty field. Settings can
+            // appear before loadKey() finishes, and that already wiped the item.
         } else {
             keychain.write(account: "xai", value: trimmed)
         }
