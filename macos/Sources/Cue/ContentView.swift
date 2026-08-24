@@ -5,6 +5,7 @@ import AppKit
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @State private var showSettings = false
+    @AppStorage(WindowPin.defaultsKey) private var pinned = false
 
     var body: some View {
         ZStack {
@@ -30,6 +31,14 @@ struct ContentView: View {
             }
             ToolbarItem(placement: .automatic) {
                 Button {
+                    pinned.toggle()
+                } label: {
+                    Image(systemName: pinned ? "pin.fill" : "pin")
+                }
+                .help(pinned ? "Stop floating above other apps" : "Keep Cue above other apps during a call")
+            }
+            ToolbarItem(placement: .automatic) {
+                Button {
                     showSettings.toggle()
                 } label: {
                     Image(systemName: "gearshape")
@@ -51,11 +60,19 @@ struct ContentView: View {
                 .environmentObject(model)
         }
         .onAppear { model.loadKey() }
+        .onChange(of: pinned) { _, newValue in
+            if let window = NSApp.windows.first(where: { $0.title == "Cue" }) {
+                WindowPin.apply(to: window, pinned: newValue)
+            }
+        }
     }
 
     private var transcriptPane: some View {
         VStack(alignment: .leading, spacing: 10) {
             header("LIVE")
+            Text(rosterStatus)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             LevelMeter(level: model.level, live: model.phase == .listening)
             if let err = model.errorMessage {
                 Text(err)
@@ -75,9 +92,14 @@ struct ContentView: View {
                         }
                         ForEach(model.transcript) { line in
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(line.at.formatted(date: .omitted, time: .standard))
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                                HStack(spacing: 6) {
+                                    Text(line.label.displayName)
+                                        .font(.caption2.weight(.bold))
+                                        .foregroundStyle(line.label.role == .remote ? Color.purple : Color.green)
+                                    Text(line.at.formatted(date: .omitted, time: .standard))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
                                 Text(line.text)
                                     .textSelection(.enabled)
                             }
@@ -104,6 +126,19 @@ struct ContentView: View {
         .padding(16)
     }
 
+    private var rosterStatus: String {
+        switch model.rosterState {
+        case .accessibilityDenied:
+            return "Grant Accessibility for names"
+        case .zoomNotRunning:
+            return "Zoom tags: Zoom not running"
+        case .meetingNotDetected:
+            return "Zoom tags: meeting not detected"
+        case .tracking(let participantCount, _):
+            return "Zoom tags: tracking \(participantCount)"
+        }
+    }
+
     private var cuePane: some View {
         VStack(alignment: .leading, spacing: 10) {
             header("SAY THIS")
@@ -127,6 +162,25 @@ struct ContentView: View {
                             }
                         }
                     }
+                }
+            }
+            if model.coachingEnabled {
+                header("COACH")
+                if model.coaching.isEmpty {
+                    Text("Coaching notes appear here as the call progresses.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 8) {
+                            ForEach(model.coaching) { note in
+                                CoachingNoteView(note: note) {
+                                    model.dismissCoaching(note)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 230)
                 }
             }
         }
@@ -166,10 +220,11 @@ struct AnswerCardView: View {
             Text(card.answer.isEmpty ? "(skipped — not a real question)" : card.answer)
                 .font(.title3.weight(.semibold))
                 .textSelection(.enabled)
+            sourceSection
             HStack {
                 Button("Copy") {
                     NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(card.answer, forType: .string)
+                    NSPasteboard.general.setString(card.sourcedAnswer ?? card.answer, forType: .string)
                 }
                 .buttonStyle(.borderless)
                 Spacer()
@@ -181,6 +236,85 @@ struct AnswerCardView: View {
         .padding(14)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.purple.opacity(0.16)))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.purple.opacity(0.35)))
+    }
+
+    @ViewBuilder
+    private var sourceSection: some View {
+        switch card.sourceState {
+        case .none:
+            EmptyView()
+        case .searching:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini)
+                Text("Checking everysphere + docs…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .empty:
+            Text("No matching docs or past calls.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .declined:
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Docs matched but didn’t answer this directly.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if !card.sourceFiles.isEmpty {
+                    Text("Looked at: " + card.sourceFiles.joined(separator: ", "))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .textSelection(.enabled)
+                }
+            }
+        case .failed:
+            Text("Source lookup failed.")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        case .done:
+            VStack(alignment: .leading, spacing: 4) {
+                Divider()
+                Text(card.sourcedAnswer ?? "")
+                    .font(.body.weight(.medium))
+                    .textSelection(.enabled)
+                Text("From: " + card.sourceFiles.joined(separator: ", "))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+}
+
+struct CoachingNoteView: View {
+    let note: CoachingNote
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(note.kind.rawValue.uppercased())
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.orange)
+                Spacer()
+                Button("Dismiss", action: onDismiss)
+                    .buttonStyle(.borderless)
+                    .font(.caption2)
+            }
+            Text(note.content)
+                .font(.callout)
+                .textSelection(.enabled)
+            if let suggestion = note.suggestion, !suggestion.isEmpty {
+                Text(suggestion)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.12)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.orange.opacity(0.3)))
     }
 }
 
@@ -207,6 +341,28 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                settingsForm
+                    .padding(24)
+            }
+            Divider()
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") {
+                    model.saveSettings()
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(12)
+        }
+        .frame(width: 560, height: 560)
+    }
+
+    private var settingsForm: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Settings")
                 .font(.title2.weight(.semibold))
@@ -214,6 +370,27 @@ struct SettingsView: View {
             Text("System audio (Zoom/Meet/browser) uses a Core Audio process tap. No BlackHole, no Multi-Output Device.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Toggle("Coaching notes (objections, questions to ask)", isOn: $model.coachingEnabled)
+            Toggle("Save transcripts (searched as part of the knowledge base)", isOn: $model.saveTranscripts)
+            HStack(spacing: 8) {
+                Text(TranscriptStore.sessionsDirectory.path)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Button("Show in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([TranscriptStore.sessionsDirectory])
+                }
+                .font(.caption)
+            }
+            Toggle("Ground answers in a local repo/docs search", isOn: $model.sourceSearchEnabled)
+            if model.sourceSearchEnabled {
+                TextField("Knowledge repo path", text: $model.sourceRoot)
+                    .textFieldStyle(.roundedBorder)
+                Text("Markdown in this repo is searched when a question is detected; a grounded answer with file citations is added to the card.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Text("xAI API key")
                 .font(.headline)
             SecureField("xai-…", text: $model.apiKeyField)
@@ -227,16 +404,6 @@ struct SettingsView: View {
             Text("Paste product facts, pricing you can say, competitive notes. Cue will not invent numbers that aren’t here.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            HStack {
-                Spacer()
-                Button("Save") {
-                    model.saveSettings()
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
-            }
         }
-        .padding(24)
-        .frame(width: 560, height: 460)
     }
 }

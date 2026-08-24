@@ -19,20 +19,34 @@ final class AppModel: ObservableObject {
     @Published var livePartial = ""
     @Published var transcript: [TranscriptLine] = []
     @Published var cues: [AnswerCard] = []
+    @Published var coaching: [CoachingNote] = []
     @Published var contextNotes = ""
     @Published var apiKeyField = ""
     @Published var includeMic = true
+    @Published var coachingEnabled = true
+    @Published var sourceSearchEnabled = true
+    @Published var sourceRoot = "~/Projects/everysphere"
+    @Published var saveTranscripts = true
     @Published var errorMessage: String?
     @Published var lastQuestion: String?
+    @Published var rosterState: RosterState = .meetingNotDetected
 
     private let keychain = KeychainStore(service: "com.davidgeorgehope.cue")
     private let capture = DualCapture()
-    private let stt = GrokSTTClient()
+    private let sttCustomer = GrokSTTClient()
+    private let sttMe = GrokSTTClient()
+    private let roster = ZoomRoster()
     private let answers = AnswerEngine()
+    private let coach = CoachingEngine()
     private let questions = QuestionDetector()
     private var recentWindow = ""
     private var lastAnswered = ""
     private var lastAnswerAt = Date.distantPast
+    private var wordsSinceCoaching = 0
+    private var lastCoachingAt = Date.distantPast
+    private var coachingInFlight = false
+    private var transcriptStore: TranscriptStore?
+    private var utteranceStart: [AudioSource: Date] = [:]
 
     init() {
         if let envNotes = ProcessInfo.processInfo.environment["CUE_CONTEXT"], !envNotes.isEmpty {
@@ -41,6 +55,13 @@ final class AppModel: ObservableObject {
             contextNotes = UserDefaults.standard.string(forKey: "cue.context") ?? ""
         }
         includeMic = UserDefaults.standard.object(forKey: "cue.includeMic") as? Bool ?? true
+        coachingEnabled = UserDefaults.standard.object(forKey: "cue.coaching") as? Bool ?? true
+        sourceSearchEnabled = UserDefaults.standard.object(forKey: "cue.sourceSearch") as? Bool ?? true
+        sourceRoot = UserDefaults.standard.string(forKey: "cue.sourceRoot") ?? "~/Projects/everysphere"
+        saveTranscripts = UserDefaults.standard.object(forKey: "cue.saveTranscripts") as? Bool ?? true
+        roster.onStateChange = { [weak self] state in
+            self?.rosterState = state
+        }
         wireSTT()
         Task { @MainActor [weak self] in
             self?.loadKey()
@@ -75,6 +96,10 @@ final class AppModel: ObservableObject {
         }
         UserDefaults.standard.set(contextNotes, forKey: "cue.context")
         UserDefaults.standard.set(includeMic, forKey: "cue.includeMic")
+        UserDefaults.standard.set(coachingEnabled, forKey: "cue.coaching")
+        UserDefaults.standard.set(sourceSearchEnabled, forKey: "cue.sourceSearch")
+        UserDefaults.standard.set(sourceRoot, forKey: "cue.sourceRoot")
+        UserDefaults.standard.set(saveTranscripts, forKey: "cue.saveTranscripts")
     }
 
     func toggleListen() {
@@ -103,16 +128,30 @@ final class AppModel: ObservableObject {
         }
         errorMessage = nil
         livePartial = ""
+        utteranceStart.removeAll()
+        wordsSinceCoaching = 0
+        lastCoachingAt = Date.distantPast
+        if saveTranscripts {
+            transcriptStore = TranscriptStore()
+        }
         phase = .listening
         statusLine = "Connecting Grok Voice STT…"
+        roster.start()
         capture.onLevel = { [weak self] level in
             Task { @MainActor in self?.level = level }
         }
-        capture.onPCM16 = { [weak self] data in
-            self?.stt.sendPCM16(data)
+        capture.onPCM16 = { [weak self] source, data in
+            switch source {
+            case .system: self?.sttCustomer.sendPCM16(data)
+            case .mic: self?.sttMe.sendPCM16(data)
+            }
         }
         FileHandle.standardError.write(Data("cue: start() connecting STT\n".utf8))
-        stt.start(apiKey: apiKeyField, keyterms: keyterms(from: contextNotes))
+        sttCustomer.start(apiKey: apiKeyField, keyterms: keyterms(from: contextNotes))
+        // In mic-only test mode the mic feeds the customer stream instead.
+        if includeMic, ProcessInfo.processInfo.environment["CUE_MIC_ONLY"] != "1" {
+            sttMe.start(apiKey: apiKeyField, keyterms: keyterms(from: contextNotes))
+        }
         Task.detached { [weak self] in
             await self?.beginCapture()
         }
@@ -124,7 +163,8 @@ final class AppModel: ObservableObject {
             let granted = await requestMicIfNeeded()
             if !granted {
                 await MainActor.run {
-                    stt.stop()
+                    stopSTT()
+                    roster.stop()
                     phase = .error
                     errorMessage = CaptureError.micPermission.localizedDescription
                     statusLine = "Capture failed"
@@ -138,12 +178,18 @@ final class AppModel: ObservableObject {
             FileHandle.standardError.write(Data("cue: capture started\n".utf8))
         } catch {
             await MainActor.run {
-                stt.stop()
+                stopSTT()
+                roster.stop()
                 phase = .error
                 errorMessage = error.localizedDescription
                 statusLine = "Capture failed"
             }
         }
+    }
+
+    private func stopSTT() {
+        sttCustomer.stop()
+        sttMe.stop()
     }
 
     private func requestMicIfNeeded() async -> Bool {
@@ -159,9 +205,17 @@ final class AppModel: ObservableObject {
 
     func stop() {
         capture.stop()
-        stt.stop()
+        stopSTT()
+        roster.stop()
         phase = .idle
-        statusLine = "Idle"
+        if let store = transcriptStore {
+            store.close()
+            statusLine = "Saved: \(store.fileURL.lastPathComponent)"
+        } else {
+            statusLine = "Idle"
+        }
+        transcriptStore = nil
+        utteranceStart.removeAll()
         livePartial = ""
         level = 0
     }
@@ -171,22 +225,38 @@ final class AppModel: ObservableObject {
     }
 
     private func wireSTT() {
+        wire(sttCustomer, source: .system, drivesStatus: true)
+        wire(sttMe, source: .mic, drivesStatus: false)
+    }
+
+    private func wire(_ stt: GrokSTTClient, source: AudioSource, drivesStatus: Bool) {
         stt.onPartial = { [weak self] text in
             DispatchQueue.main.async {
                 guard let self else { return }
-                FileHandle.standardError.write(Data("cue: partial \(text)\n".utf8))
-                self.livePartial = text
+                let roleName = source == .system ? "Customer" : "Me"
+                if self.utteranceStart[source] == nil {
+                    self.utteranceStart[source] = Date()
+                }
+                FileHandle.standardError.write(Data("cue: partial [\(source.rawValue)] \(text)\n".utf8))
+                self.livePartial = "\(roleName): \(text)"
             }
         }
         stt.onFinal = { [weak self] text in
             DispatchQueue.main.async {
-                FileHandle.standardError.write(Data("cue: final \(text)\n".utf8))
-                self?.ingest(text)
+                guard let self else { return }
+                let now = Date()
+                let start = self.utteranceStart.removeValue(forKey: source) ?? now.addingTimeInterval(-2)
+                let label = self.roster.label(
+                    for: source,
+                    during: DateInterval(start: start, end: now)
+                )
+                FileHandle.standardError.write(Data("cue: final [\(label.displayName)] \(text)\n".utf8))
+                self.ingest(text, from: label, at: now)
             }
         }
         stt.onStatus = { [weak self] text in
             DispatchQueue.main.async {
-                if self?.phase == .listening {
+                if drivesStatus, self?.phase == .listening {
                     self?.statusLine = text
                 }
             }
@@ -194,24 +264,30 @@ final class AppModel: ObservableObject {
         stt.onError = { [weak self] text in
             DispatchQueue.main.async {
                 guard let self, self.phase == .listening else { return }
-                self.statusLine = "STT: \(text)"
+                self.statusLine = "STT (\(source.rawValue)): \(text)"
             }
         }
     }
 
-    private func ingest(_ raw: String) {
+    private func ingest(_ raw: String, from label: SpeakerLabel, at date: Date) {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, text.lowercased() != "(silence)" else { return }
         livePartial = ""
 
-        let line = TranscriptLine(text: text, at: Date())
+        let line = TranscriptLine(label: label, text: text, at: date)
         transcript.append(line)
         if transcript.count > 80 { transcript.removeFirst(transcript.count - 80) }
+        transcriptStore?.append(speaker: label.displayName, text: text, at: line.at)
 
-        recentWindow = (recentWindow + " " + text)
+        recentWindow = (recentWindow + "\n\(label.displayName): " + text)
             .split(separator: " ")
             .suffix(280)
             .joined(separator: " ")
+
+        wordsSinceCoaching += text.split(separator: " ").count
+        maybeCoach()
+
+        guard label.role == .remote else { return }
 
         if let question = questions.detect(in: text, recent: recentWindow) {
             FileHandle.standardError.write(Data("cue: question \(question)\n".utf8))
@@ -243,9 +319,102 @@ final class AppModel: ObservableObject {
             cues.insert(card, at: 0)
             if cues.count > 12 { cues.removeLast(cues.count - 12) }
             statusLine = "Answer ready"
+            enrichWithSources(cardID: card.id, question: question)
         } catch {
             statusLine = "Answer failed: \(error.localizedDescription)"
         }
+    }
+
+    /// Second stage: search the local knowledge repo for the question and,
+    /// if snippets are found, update the card with a grounded answer.
+    private func enrichWithSources(cardID: UUID, question: String) {
+        guard sourceSearchEnabled else { return }
+        var roots: [String] = []
+        let repoRoot = (sourceRoot as NSString).expandingTildeInPath
+        if FileManager.default.fileExists(atPath: repoRoot) {
+            roots.append(repoRoot)
+        }
+        let sessions = TranscriptStore.sessionsDirectory.path
+        if FileManager.default.fileExists(atPath: sessions) {
+            roots.append(sessions)
+        }
+        guard !roots.isEmpty else { return }
+        updateCard(cardID) { $0.sourceState = .searching }
+
+        let notes = contextNotes
+        let key = apiKeyField
+        let engine = answers
+        let dialogue = recentWindow
+        let exclude = Set([transcriptStore?.fileURL.lastPathComponent].compactMap { $0 })
+        Task.detached(priority: .utility) { [weak self] in
+            var search = SourceSearch(roots: roots)
+            search.excludeBasenames = exclude
+            let hits = search.search(question: question, context: dialogue)
+            guard let self else { return }
+            guard !hits.isEmpty else {
+                await MainActor.run { self.updateCard(cardID) { $0.sourceState = .empty } }
+                return
+            }
+            let snippets = hits
+                .map { "FILE: \($0.file)\n\($0.snippet)" }
+                .joined(separator: "\n\n---\n\n")
+            do {
+                let sourced = try await engine.sourcedAnswer(
+                    question: question, snippets: snippets, notes: notes,
+                    transcript: dialogue, apiKey: key
+                )
+                await MainActor.run {
+                    self.updateCard(cardID) {
+                        $0.sourceFiles = hits.map(\.file)
+                        if sourced.isEmpty {
+                            // Hits existed but the model declined to ground an answer.
+                            $0.sourceState = .declined
+                        } else {
+                            $0.sourcedAnswer = sourced
+                            $0.sourceState = .done
+                        }
+                    }
+                }
+            } catch {
+                await MainActor.run { self.updateCard(cardID) { $0.sourceState = .failed } }
+            }
+        }
+    }
+
+    private func updateCard(_ id: UUID, _ mutate: (inout AnswerCard) -> Void) {
+        guard let idx = cues.firstIndex(where: { $0.id == id }) else { return }
+        mutate(&cues[idx])
+    }
+
+    private func maybeCoach() {
+        guard coachingEnabled, phase == .listening, !coachingInFlight else { return }
+        guard wordsSinceCoaching >= 40,
+              Date().timeIntervalSince(lastCoachingAt) >= 45 else { return }
+        coachingInFlight = true
+        wordsSinceCoaching = 0
+        lastCoachingAt = Date()
+
+        let dialogue = recentWindow
+        let notes = contextNotes
+        let key = apiKeyField
+        Task {
+            defer { coachingInFlight = false }
+            do {
+                let new = try await coach.analyze(dialogue: dialogue, notes: notes, apiKey: key)
+                let fresh = new.filter { note in
+                    !coaching.contains { $0.content == note.content }
+                }
+                guard !fresh.isEmpty else { return }
+                coaching.insert(contentsOf: fresh, at: 0)
+                if coaching.count > 10 { coaching.removeLast(coaching.count - 10) }
+            } catch {
+                FileHandle.standardError.write(Data("cue: coaching error \(error.localizedDescription)\n".utf8))
+            }
+        }
+    }
+
+    func dismissCoaching(_ note: CoachingNote) {
+        coaching.removeAll { $0.id == note.id }
     }
 
     private func keyterms(from notes: String) -> [String] {
@@ -258,13 +427,26 @@ final class AppModel: ObservableObject {
 
 struct TranscriptLine: Identifiable, Equatable {
     let id = UUID()
+    let label: SpeakerLabel
     let text: String
     let at: Date
 }
 
 struct AnswerCard: Identifiable, Equatable {
+    enum SourceState: Equatable {
+        case none
+        case searching
+        case done
+        case empty
+        case declined
+        case failed
+    }
+
     let id = UUID()
     let question: String
     let answer: String
+    var sourcedAnswer: String?
+    var sourceFiles: [String] = []
+    var sourceState: SourceState = .none
     let at: Date
 }

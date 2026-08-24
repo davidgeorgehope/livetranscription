@@ -16,12 +16,14 @@ final class GrokSTTClient: NSObject, URLSessionWebSocketDelegate {
     private let lock = NSLock()
     private var closed = true
     private var connectWatch: DispatchWorkItem?
+    private var lastFinal = ""
 
     func start(apiKey: String, keyterms: [String] = []) {
         stop()
         closed = false
         ready = false
         pending = Data()
+        lastFinal = ""
 
         var items: [URLQueryItem] = [
             .init(name: "sample_rate", value: "16000"),
@@ -159,17 +161,27 @@ final class GrokSTTClient: NSObject, URLSessionWebSocketDelegate {
             let speechFinal = obj["speech_final"] as? Bool ?? false
             onPartial?(spoken)
             if speechFinal || isFinal {
-                onFinal?(spoken)
+                emitFinal(spoken)
             }
         case "transcript.done":
-            if let spoken = obj["text"] as? String, !spoken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                onFinal?(spoken.trimmingCharacters(in: .whitespacesAndNewlines))
+            if let spoken = obj["text"] as? String {
+                emitFinal(spoken)
             }
         case "error":
             onError?(obj["message"] as? String ?? "Grok STT error")
         default:
             break
         }
+    }
+
+    /// The server can finalize the same utterance twice (an `is_final`
+    /// partial followed by `speech_final` or `transcript.done` with identical
+    /// text), which duplicated transcript lines. Emit each final text once.
+    private func emitFinal(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != lastFinal else { return }
+        lastFinal = trimmed
+        onFinal?(trimmed)
     }
 
     private func flushPending() {

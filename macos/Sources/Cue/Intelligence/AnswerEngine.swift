@@ -25,10 +25,46 @@ struct AnswerEngine {
         \(question)
         """
 
+        return try await send(system: system, user: user, maxTokens: 180, apiKey: apiKey)
+    }
+
+    /// Second-stage answer grounded in snippets found in the local knowledge
+    /// repo. Slower than the quick answer; updates the card when it lands.
+    func sourcedAnswer(question: String, snippets: String, notes: String, transcript: String, apiKey: String) async throws -> String {
+        let system = """
+        You are a live call copilot. The customer asked a question and internal repo/docs \
+        snippets that may answer it are provided. Give the user a spoken-ready answer \
+        grounded ONLY in the snippets and notes.
+
+        Rules:
+        - 2 to 5 short sentences the user can say out loud.
+        - Use ONLY facts present in the snippets or notes. No invention.
+        - Mention the source file name in parentheses after a claim, e.g. (docs/pricing.md).
+        - If the snippets do not actually answer the question, reply with SKIP.
+        """
+
+        let user = """
+        CUSTOMER QUESTION:
+        \(question)
+
+        RECENT CONVERSATION (for what the question refers to):
+        \(transcript.suffix(1200))
+
+        USER'S NOTES:
+        \(notes.isEmpty ? "(none)" : String(notes.prefix(1200)))
+
+        REPO/DOCS SNIPPETS:
+        \(snippets.prefix(7000))
+        """
+
+        return try await send(system: system, user: user, maxTokens: 320, apiKey: apiKey)
+    }
+
+    private func send(system: String, user: String, maxTokens: Int, apiKey: String) async throws -> String {
         let payload: [String: Any] = [
             "model": "grok-4.6",
             "temperature": 0.2,
-            "max_tokens": 180,
+            "max_tokens": maxTokens,
             "messages": [
                 ["role": "system", "content": system],
                 ["role": "user", "content": user]
