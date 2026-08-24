@@ -20,6 +20,14 @@ final class AppModel: ObservableObject {
     @Published var transcript: [TranscriptLine] = []
     @Published var cues: [AnswerCard] = []
     @Published var coaching: [CoachingNote] = []
+    @Published var commitments: [CallCommitment] = []
+    @Published var sessions: [SessionRecord] = []
+    @Published var selectedSession: SessionRecord?
+    @Published var selectedSessionBody = ""
+    @Published var selectedSessionWrap: String?
+    @Published var latestWrap: CallWrap?
+    @Published var showWrapSheet = false
+    @Published var wrapInFlight = false
     @Published var contextNotes = ""
     @Published var apiKeyField = ""
     @Published var includeMic = true
@@ -38,6 +46,8 @@ final class AppModel: ObservableObject {
     private let roster = ZoomRoster()
     private let answers = AnswerEngine()
     private let coach = CoachingEngine()
+    private let commitmentExtractor = CommitmentExtractor()
+    private let wrapEngine = CallWrapEngine()
     private let questions = QuestionDetector()
     private var recentWindow = ""
     private var lastAnswered = ""
@@ -45,6 +55,9 @@ final class AppModel: ObservableObject {
     private var wordsSinceCoaching = 0
     private var lastCoachingAt = Date.distantPast
     private var coachingInFlight = false
+    private var wordsSinceCommitments = 0
+    private var lastCommitmentsAt = Date.distantPast
+    private var commitmentsInFlight = false
     private var transcriptStore: TranscriptStore?
     private var utteranceStart: [AudioSource: Date] = [:]
 
@@ -63,6 +76,7 @@ final class AppModel: ObservableObject {
             self?.rosterState = state
         }
         wireSTT()
+        refreshSessions()
         Task { @MainActor [weak self] in
             self?.loadKey()
             if ProcessInfo.processInfo.environment["CUE_AUTOSTART"] == "1" {
@@ -71,6 +85,22 @@ final class AppModel: ObservableObject {
                 self?.start()
             }
         }
+    }
+
+    func refreshSessions() {
+        sessions = SessionLibrary.list()
+    }
+
+    func openSession(_ session: SessionRecord) {
+        selectedSession = session
+        selectedSessionBody = SessionLibrary.readTranscript(session)
+        selectedSessionWrap = SessionLibrary.readWrap(session)
+    }
+
+    func dismissSession() {
+        selectedSession = nil
+        selectedSessionBody = ""
+        selectedSessionWrap = nil
     }
 
     func loadKey() {
@@ -131,6 +161,11 @@ final class AppModel: ObservableObject {
         utteranceStart.removeAll()
         wordsSinceCoaching = 0
         lastCoachingAt = Date.distantPast
+        wordsSinceCommitments = 0
+        lastCommitmentsAt = Date.distantPast
+        commitments = []
+        latestWrap = nil
+        showWrapSheet = false
         if saveTranscripts {
             transcriptStore = TranscriptStore()
         }
@@ -208,6 +243,17 @@ final class AppModel: ObservableObject {
         stopSTT()
         roster.stop()
         phase = .idle
+        livePartial = ""
+        level = 0
+        utteranceStart.removeAll()
+
+        let dialogue = recentWindow
+        let captured = commitments
+        let notes = contextNotes
+        let key = apiKeyField
+        let storeURL = transcriptStore?.fileURL
+        let storeName = storeURL?.lastPathComponent
+
         if let store = transcriptStore {
             store.close()
             statusLine = "Saved: \(store.fileURL.lastPathComponent)"
@@ -215,9 +261,32 @@ final class AppModel: ObservableObject {
             statusLine = "Idle"
         }
         transcriptStore = nil
-        utteranceStart.removeAll()
-        livePartial = ""
-        level = 0
+        refreshSessions()
+
+        guard let storeURL, !dialogue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, hasKey else {
+            return
+        }
+        wrapInFlight = true
+        statusLine = "Writing call wrap…"
+        Task {
+            defer { wrapInFlight = false }
+            do {
+                let wrap = try await wrapEngine.wrap(
+                    dialogue: dialogue,
+                    commitments: captured,
+                    notes: notes,
+                    apiKey: key
+                )
+                let title = storeName ?? "call"
+                CallWrapEngine.write(wrap, beside: storeURL, title: title)
+                latestWrap = wrap
+                showWrapSheet = true
+                refreshSessions()
+                statusLine = "Wrap ready · \(storeURL.lastPathComponent)"
+            } catch {
+                statusLine = "Wrap failed: \(error.localizedDescription)"
+            }
+        }
     }
 
     func dismiss(_ card: AnswerCard) {
@@ -285,7 +354,9 @@ final class AppModel: ObservableObject {
             .joined(separator: " ")
 
         wordsSinceCoaching += text.split(separator: " ").count
+        wordsSinceCommitments += text.split(separator: " ").count
         maybeCoach()
+        maybeExtractCommitments()
 
         guard label.role == .remote else { return }
 
@@ -415,6 +486,38 @@ final class AppModel: ObservableObject {
 
     func dismissCoaching(_ note: CoachingNote) {
         coaching.removeAll { $0.id == note.id }
+    }
+
+    func dismissCommitment(_ item: CallCommitment) {
+        commitments.removeAll { $0.id == item.id }
+    }
+
+    private func maybeExtractCommitments() {
+        guard phase == .listening, !commitmentsInFlight else { return }
+        guard wordsSinceCommitments >= 50,
+              Date().timeIntervalSince(lastCommitmentsAt) >= 60 else { return }
+        commitmentsInFlight = true
+        wordsSinceCommitments = 0
+        lastCommitmentsAt = Date()
+
+        let dialogue = recentWindow
+        let key = apiKeyField
+        Task {
+            defer { commitmentsInFlight = false }
+            do {
+                let fresh = try await commitmentExtractor.extract(dialogue: dialogue, apiKey: key)
+                let novel = fresh.filter { item in
+                    !commitments.contains {
+                        $0.kind == item.kind && $0.text.localizedCaseInsensitiveCompare(item.text) == .orderedSame
+                    }
+                }
+                guard !novel.isEmpty else { return }
+                commitments.insert(contentsOf: novel, at: 0)
+                if commitments.count > 16 { commitments.removeLast(commitments.count - 16) }
+            } catch {
+                FileHandle.standardError.write(Data("cue: commitments error \(error.localizedDescription)\n".utf8))
+            }
+        }
     }
 
     private func keyterms(from notes: String) -> [String] {

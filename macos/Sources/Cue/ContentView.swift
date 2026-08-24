@@ -5,6 +5,7 @@ import AppKit
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @State private var showSettings = false
+    @State private var showSessions = false
     @AppStorage(WindowPin.defaultsKey) private var pinned = false
 
     var body: some View {
@@ -28,6 +29,15 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                 }
+            }
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    model.refreshSessions()
+                    showSessions = true
+                } label: {
+                    Image(systemName: "list.bullet.rectangle")
+                }
+                .help("Past calls")
             }
             ToolbarItem(placement: .automatic) {
                 Button {
@@ -58,6 +68,17 @@ struct ContentView: View {
         .sheet(isPresented: $showSettings) {
             SettingsView()
                 .environmentObject(model)
+        }
+        .sheet(isPresented: $showSessions) {
+            SessionsBrowserView()
+                .environmentObject(model)
+        }
+        .sheet(isPresented: $model.showWrapSheet) {
+            if let wrap = model.latestWrap {
+                WrapSheetView(wrap: wrap) {
+                    model.showWrapSheet = false
+                }
+            }
         }
         .onAppear { model.loadKey() }
         .onChange(of: pinned) { _, newValue in
@@ -180,8 +201,27 @@ struct ContentView: View {
                             }
                         }
                     }
-                    .frame(maxHeight: 230)
+                    .frame(maxHeight: 180)
                 }
+            }
+            header("TRACK")
+            if model.commitments.isEmpty {
+                Text(model.phase == .listening
+                     ? "Commitments and open questions land here as the call progresses."
+                     : "Start a call to capture commitments.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(model.commitments) { item in
+                            CommitmentRowView(item: item) {
+                                model.dismissCommitment(item)
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 200)
             }
         }
         .padding(16)
@@ -315,6 +355,190 @@ struct CoachingNoteView: View {
         .padding(10)
         .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.12)))
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.orange.opacity(0.3)))
+    }
+}
+
+struct CommitmentRowView: View {
+    let item: CallCommitment
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(item.kind.rawValue.uppercased())
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(color)
+                Text(item.speaker)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Dismiss", action: onDismiss)
+                    .buttonStyle(.borderless)
+                    .font(.caption2)
+            }
+            Text(item.text)
+                .font(.callout)
+                .textSelection(.enabled)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(color.opacity(0.12)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(color.opacity(0.3)))
+    }
+
+    private var color: Color {
+        switch item.kind {
+        case .commitment: return .cyan
+        case .openQuestion: return .yellow
+        case .decision: return .mint
+        }
+    }
+}
+
+@available(macOS 14.2, *)
+struct SessionsBrowserView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        HSplitView {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    Text("Past calls")
+                        .font(.headline)
+                    Spacer()
+                    Button("Refresh") { model.refreshSessions() }
+                    Button("Done") { dismiss() }
+                        .keyboardShortcut(.defaultAction)
+                }
+                .padding(12)
+                Divider()
+                if model.sessions.isEmpty {
+                    Text("No saved transcripts yet. Hit Listen with “Save transcripts” on.")
+                        .foregroundStyle(.secondary)
+                        .padding(16)
+                    Spacer()
+                } else {
+                    List(model.sessions, selection: Binding(
+                        get: { model.selectedSession?.id },
+                        set: { url in
+                            if let url, let session = model.sessions.first(where: { $0.id == url }) {
+                                model.openSession(session)
+                            }
+                        }
+                    )) { session in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(session.title)
+                                    .font(.callout.weight(.semibold))
+                                if session.hasWrap {
+                                    Text("WRAP")
+                                        .font(.caption2.weight(.bold))
+                                        .foregroundStyle(.purple)
+                                }
+                            }
+                            Text("\(session.lineCount) lines")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            if !session.preview.isEmpty {
+                                Text(session.preview)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                        }
+                        .tag(session.id)
+                    }
+                }
+            }
+            .frame(minWidth: 260)
+
+            VStack(alignment: .leading, spacing: 0) {
+                if let session = model.selectedSession {
+                    HStack {
+                        Text(session.title)
+                            .font(.headline)
+                        Spacer()
+                        Button("Show in Finder") {
+                            NSWorkspace.shared.activateFileViewerSelecting([session.fileURL])
+                        }
+                    }
+                    .padding(12)
+                    Divider()
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            Text(model.selectedSessionBody)
+                                .font(.system(.body, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            if let wrap = model.selectedSessionWrap, !wrap.isEmpty {
+                                Divider()
+                                Text("Wrap")
+                                    .font(.headline)
+                                Text(wrap)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        .padding(16)
+                    }
+                } else {
+                    Text("Select a call to read the full transcript.")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .frame(minWidth: 420)
+        }
+        .frame(width: 900, height: 560)
+        .onAppear {
+            model.refreshSessions()
+            if model.selectedSession == nil, let first = model.sessions.first {
+                model.openSession(first)
+            }
+        }
+    }
+}
+
+struct WrapSheetView: View {
+    let wrap: CallWrap
+    let onDone: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Call wrap")
+                .font(.title2.weight(.semibold))
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Summary")
+                        .font(.headline)
+                    Text(wrap.summary.isEmpty ? "(empty)" : wrap.summary)
+                        .textSelection(.enabled)
+                    if !wrap.commitments.isEmpty {
+                        Text("Commitments & open questions")
+                            .font(.headline)
+                        ForEach(wrap.commitments) { item in
+                            Text("• [\(item.kind.rawValue)] \(item.speaker): \(item.text)")
+                                .textSelection(.enabled)
+                        }
+                    }
+                    Text("Follow-up draft")
+                        .font(.headline)
+                    Text(wrap.followUpDraft.isEmpty ? "(empty)" : wrap.followUpDraft)
+                        .textSelection(.enabled)
+                }
+            }
+            HStack {
+                Button("Copy follow-up") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(wrap.followUpDraft, forType: .string)
+                }
+                Spacer()
+                Button("Done", action: onDone)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 560, height: 520)
     }
 }
 
