@@ -120,7 +120,11 @@ struct SourceSearch {
         if lower.contains("/docs/") { boost += 0.05 }
         if lower.contains("origin") { boost += 0.08 }
         if lower.contains("scm-integrations") { boost += 0.06 }
-        if URL(fileURLWithPath: path).lastPathComponent.hasPrefix("call-") {
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        if name.hasSuffix(".wrap.md") {
+            // Distilled call wraps should outrank raw transcript echo.
+            boost += 0.15
+        } else if name.hasPrefix("call-") {
             boost -= 0.2
         }
         return boost

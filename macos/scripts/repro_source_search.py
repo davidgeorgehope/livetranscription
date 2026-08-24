@@ -79,7 +79,10 @@ def path_boost(path: str) -> float:
         boost += 0.08
     if "scm-integrations" in lower:
         boost += 0.06
-    if Path(path).name.startswith("call-"):
+    name = Path(path).name
+    if name.endswith(".wrap.md"):
+        boost += 0.15
+    elif name.startswith("call-"):
         boost -= 0.2
     return boost
 

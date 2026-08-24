@@ -159,6 +159,9 @@ final class AppModel: ObservableObject {
         errorMessage = nil
         livePartial = ""
         utteranceStart.removeAll()
+        transcript = []
+        cues = []
+        coaching = []
         wordsSinceCoaching = 0
         lastCoachingAt = Date.distantPast
         wordsSinceCommitments = 0
