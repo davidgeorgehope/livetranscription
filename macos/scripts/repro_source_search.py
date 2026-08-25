@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rerun Cue's SourceSearch logic against real call questions.
+"""Rerun Cue's SourceSearch logic against sample questions.
 
 Mirrors macos/Sources/Cue/Intelligence/SourceSearch.swift so a reviewer
 can reproduce miss/hit behavior without launching the app.
@@ -7,6 +7,7 @@ can reproduce miss/hit behavior without launching the app.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -30,16 +31,14 @@ STOPWORDS = {
     "here", "been", "being", "its", "his", "her", "him", "she", "from",
 }
 
+# Synthetic samples only — never commit real call questions.
 DEFAULT_QUESTIONS = [
-    "Is that something which is integrated natively in this overview, the overview that you have?",
-    "can a viewer interact with these changes, I mean, asking questions to get insights is that a capability available here?",
-    "is this also for the GitHub Enterprise server? Like, can we do that same work from an Enterprise server?",
-    "is there a native migration that we support for moving from the GitHub Actions CI jobs to Origin?",
-    "So Matthew, so how do we enable this for the subset of users?",
-    "So it'll be part of same cursor or is there a different endpoint for this?",
-    "Do we get a support during the POC?",
-    "but we wanted to be flexible and also look at options for automerge?",
-    "So how, how does it look like in Origin?",
+    "how does SSO work with our identity provider?",
+    "can viewers ask questions about these charts?",
+    "is there a migration path from our current CI jobs?",
+    "how does that show up in the admin UI?",
+    "do we get support during a proof of concept?",
+    "what options do we have for automerge?",
 ]
 
 
@@ -173,17 +172,25 @@ def search(question: str, roots: list[str], exclude: set[str] | None = None) -> 
 
 
 def main() -> int:
-    roots = [str(Path("~/Projects/everysphere").expanduser())]
+    # Override with CUE_SOURCE_ROOT; otherwise only past Cue sessions if present.
+    roots: list[str] = []
+    if root := os.environ.get("CUE_SOURCE_ROOT", "").strip():
+        roots.append(str(Path(root).expanduser()))
     sessions = Path("~/Library/Application Support/Cue/sessions").expanduser()
     if sessions.exists():
         roots.append(str(sessions))
+    if not roots:
+        print("No knowledge roots. Set CUE_SOURCE_ROOT or enable Cue session saves.", file=sys.stderr)
+        return 1
 
     questions = DEFAULT_QUESTIONS
     if len(sys.argv) > 1:
         questions = sys.argv[1:]
 
-    # Mimic excluding the active live session.
-    exclude = {"call-2026-08-24_11-43-10.md"}
+    # Optional: exclude a live session basename via CUE_EXCLUDE_SESSION.
+    exclude: set[str] = set()
+    if excl := os.environ.get("CUE_EXCLUDE_SESSION", "").strip():
+        exclude.add(excl)
 
     hits = misses = self_top = 0
     for q in questions:

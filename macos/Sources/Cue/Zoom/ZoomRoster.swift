@@ -58,8 +58,7 @@ final class ZoomRoster {
     private var running = false
 
     func start() {
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
+        Permissions.ensureAccessibility(promptIfNeeded: true)
 
         queue.async { [weak self] in
             guard let self, !self.running else { return }

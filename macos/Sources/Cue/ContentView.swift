@@ -98,8 +98,15 @@ struct ContentView: View {
             if let err = model.errorMessage {
                 Text(err)
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(.red.opacity(0.9))
                     .textSelection(.enabled)
+                HStack(spacing: 8) {
+                    Button("System Audio…") { Permissions.openSystemAudioRecordingSettings() }
+                    Button("Microphone…") { Permissions.openMicrophoneSettings() }
+                    Button("Accessibility…") { Permissions.openAccessibilitySettings() }
+                }
+                .font(.caption)
+                .buttonStyle(.bordered)
             }
             ScrollViewReader { proxy in
                 ScrollView {
@@ -150,7 +157,7 @@ struct ContentView: View {
     private var rosterStatus: String {
         switch model.rosterState {
         case .accessibilityDenied:
-            return "Grant Accessibility for names"
+            return "Zoom names need Accessibility — if Cue already shows On, remove it and re-enable (stale grant from an older build)."
         case .zoomNotRunning:
             return "Zoom tags: Zoom not running"
         case .meetingNotDetected:
@@ -286,7 +293,7 @@ struct AnswerCardView: View {
         case .searching:
             HStack(spacing: 6) {
                 ProgressView().controlSize(.mini)
-                Text("Checking everysphere + docs…")
+                Text("Checking knowledge base…")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -609,9 +616,15 @@ struct SettingsView: View {
             }
             Toggle("Ground answers in a local repo/docs search", isOn: $model.sourceSearchEnabled)
             if model.sourceSearchEnabled {
-                TextField("Knowledge repo path", text: $model.sourceRoot)
+                TextField("Primary knowledge folder", text: $model.sourceRoot)
                     .textFieldStyle(.roundedBorder)
-                Text("Markdown in this repo is searched when a question is detected; a grounded answer with file citations is added to the card.")
+                Text("Additional folders (one path per line)")
+                    .font(.headline)
+                TextEditor(text: $model.extraSourceRoots)
+                    .font(.body.monospaced())
+                    .frame(minHeight: 72)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.12)))
+                Text("Markdown under these paths is searched when a question is detected. Past Cue calls are included automatically when transcript saving is on.\n\nGrok Bot: point an agent at \(TranscriptStore.sessionsDirectory.path) to read Cue transcripts/wraps. To pull Grok Bot notes into Cue, dump markdown somewhere and add that folder above — do not point Cue at ~/.grokbot (daemon config + secrets, not docs).")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

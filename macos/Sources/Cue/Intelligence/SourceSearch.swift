@@ -5,7 +5,7 @@ struct SourceHit {
     let snippet: String
 }
 
-/// Ranked ripgrep search over local knowledge roots (everysphere + past call
+/// Ranked ripgrep search over local knowledge roots (docs repo + past call
 /// transcripts). Conversational questions are mostly filler, so keywords are
 /// weighted by rarity (1/df). Product-path boosts and demoting live
 /// `call-*.md` files keep grounding on docs instead of the current transcript.
@@ -113,7 +113,7 @@ struct SourceSearch {
     }
 
     /// Prefer product docs; demote past-call transcripts so they don't drown
-    /// out everysphere when the question text also appears in a session file.
+    /// out the knowledge repo when the question text also appears in a session file.
     static func pathBoost(_ path: String) -> Double {
         let lower = path.lowercased()
         var boost = 0.0

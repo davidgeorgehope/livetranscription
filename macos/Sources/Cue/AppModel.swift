@@ -33,7 +33,10 @@ final class AppModel: ObservableObject {
     @Published var includeMic = true
     @Published var coachingEnabled = true
     @Published var sourceSearchEnabled = true
-    @Published var sourceRoot = "~/Projects/everysphere"
+    @Published var sourceRoot = ""
+    /// Extra markdown folders Cue should search (one path per line). Use this
+    /// to pull in Grok Bot exports or any other local docs dump.
+    @Published var extraSourceRoots = ""
     @Published var saveTranscripts = true
     @Published var errorMessage: String?
     @Published var lastQuestion: String?
@@ -70,7 +73,8 @@ final class AppModel: ObservableObject {
         includeMic = UserDefaults.standard.object(forKey: "cue.includeMic") as? Bool ?? true
         coachingEnabled = UserDefaults.standard.object(forKey: "cue.coaching") as? Bool ?? true
         sourceSearchEnabled = UserDefaults.standard.object(forKey: "cue.sourceSearch") as? Bool ?? true
-        sourceRoot = UserDefaults.standard.string(forKey: "cue.sourceRoot") ?? "~/Projects/everysphere"
+        sourceRoot = UserDefaults.standard.string(forKey: "cue.sourceRoot") ?? ""
+        extraSourceRoots = UserDefaults.standard.string(forKey: "cue.extraSourceRoots") ?? ""
         saveTranscripts = UserDefaults.standard.object(forKey: "cue.saveTranscripts") as? Bool ?? true
         roster.onStateChange = { [weak self] state in
             self?.rosterState = state
@@ -129,6 +133,7 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(coachingEnabled, forKey: "cue.coaching")
         UserDefaults.standard.set(sourceSearchEnabled, forKey: "cue.sourceSearch")
         UserDefaults.standard.set(sourceRoot, forKey: "cue.sourceRoot")
+        UserDefaults.standard.set(extraSourceRoots, forKey: "cue.extraSourceRoots")
         UserDefaults.standard.set(saveTranscripts, forKey: "cue.saveTranscripts")
     }
 
@@ -399,19 +404,33 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Roots Cue ripgreps for grounded answers: primary repo, optional extras
+    /// (Grok Bot dumps, etc.), and past call sessions when saving is on.
+    func resolvedKnowledgeRoots() -> [String] {
+        var roots: [String] = []
+        var seen = Set<String>()
+        func add(_ raw: String) {
+            let path = (raw as NSString).expandingTildeInPath
+            guard !path.isEmpty, FileManager.default.fileExists(atPath: path), !seen.contains(path)
+            else { return }
+            seen.insert(path)
+            roots.append(path)
+        }
+        add(sourceRoot)
+        for line in extraSourceRoots.split(whereSeparator: \.isNewline) {
+            add(String(line).trimmingCharacters(in: .whitespaces))
+        }
+        if saveTranscripts {
+            add(TranscriptStore.sessionsDirectory.path)
+        }
+        return roots
+    }
+
     /// Second stage: search the local knowledge repo for the question and,
     /// if snippets are found, update the card with a grounded answer.
     private func enrichWithSources(cardID: UUID, question: String) {
         guard sourceSearchEnabled else { return }
-        var roots: [String] = []
-        let repoRoot = (sourceRoot as NSString).expandingTildeInPath
-        if FileManager.default.fileExists(atPath: repoRoot) {
-            roots.append(repoRoot)
-        }
-        let sessions = TranscriptStore.sessionsDirectory.path
-        if FileManager.default.fileExists(atPath: sessions) {
-            roots.append(sessions)
-        }
+        let roots = resolvedKnowledgeRoots()
         guard !roots.isEmpty else { return }
         updateCard(cardID) { $0.sourceState = .searching }
 

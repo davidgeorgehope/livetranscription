@@ -44,6 +44,20 @@ cat > "$contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-codesign --force --deep --sign - "$app"
+# Prefer a stable local codesigning cert so System Audio / Accessibility
+# grants survive rebuilds. Ad-hoc (`-`) changes CDHash every build and leaves
+# ghost "enabled" Cue rows in System Settings.
+chmod +x scripts/ensure-codesign-identity.sh
+identity="$(./scripts/ensure-codesign-identity.sh)"
+codesign --force --deep --sign "$identity" --identifier com.davidgeorgehope.cue "$app"
+
+# Canonical launch path — one TCC client path instead of a moving build tree.
+install_dir="${CUE_INSTALL_DIR:-$HOME/Applications}"
+mkdir -p "$install_dir"
+rm -rf "$install_dir/Cue.app"
+cp -R "$app" "$install_dir/Cue.app"
+codesign --force --deep --sign "$identity" --identifier com.davidgeorgehope.cue "$install_dir/Cue.app"
 
 echo "Built $PWD/$app"
+echo "Installed $install_dir/Cue.app (signed as $identity)"
+echo "Launch that copy going forward so permissions stick across rebuilds."
