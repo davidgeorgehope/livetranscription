@@ -390,17 +390,18 @@ final class AppModel: ObservableObject {
                 notes: contextNotes,
                 apiKey: apiKeyField
             )
-            guard !answer.isEmpty else {
-                statusLine = "Listening for customer questions…"
-                return
-            }
-            let card = AnswerCard(question: question, answer: answer, at: Date())
+            // Even when the quick model SKIPs, still open a card and run the
+            // docs search — empty notes used to abort before grounding ran.
+            let display = answer.isEmpty ? "Looking up in docs…" : answer
+            let card = AnswerCard(question: question, answer: display, at: Date())
             cues.insert(card, at: 0)
             if cues.count > 12 { cues.removeLast(cues.count - 12) }
-            statusLine = "Answer ready"
+            statusLine = answer.isEmpty ? "Checking docs…" : "Answer ready"
+            Self.answerLog("quick \(answer.isEmpty ? "SKIP" : "ok") q=\(question.prefix(80))")
             enrichWithSources(cardID: card.id, question: question)
         } catch {
             statusLine = "Answer failed: \(error.localizedDescription)"
+            Self.answerLog("quick FAIL \(error.localizedDescription)")
         }
     }
 
@@ -429,9 +430,24 @@ final class AppModel: ObservableObject {
     /// Second stage: search the local knowledge repo for the question and,
     /// if snippets are found, update the card with a grounded answer.
     private func enrichWithSources(cardID: UUID, question: String) {
-        guard sourceSearchEnabled else { return }
+        guard sourceSearchEnabled else {
+            // Quick path said "Looking up…" but search is off — clear placeholder.
+            updateCard(cardID) { card in
+                if card.answer == "Looking up in docs…" {
+                    card.answer = "No notes/docs configured — add call context in Settings."
+                }
+            }
+            return
+        }
         let roots = resolvedKnowledgeRoots()
-        guard !roots.isEmpty else { return }
+        guard !roots.isEmpty else {
+            updateCard(cardID) { card in
+                if card.answer == "Looking up in docs…" {
+                    card.answer = "No knowledge folder set — add one in Settings."
+                }
+            }
+            return
+        }
         updateCard(cardID) { $0.sourceState = .searching }
 
         let notes = contextNotes
@@ -445,7 +461,15 @@ final class AppModel: ObservableObject {
             let hits = search.search(question: question, context: dialogue)
             guard let self else { return }
             guard !hits.isEmpty else {
-                await MainActor.run { self.updateCard(cardID) { $0.sourceState = .empty } }
+                await MainActor.run {
+                    self.updateCard(cardID) { card in
+                        card.sourceState = .empty
+                        if card.answer == "Looking up in docs…" {
+                            card.answer = "No matching docs — add a spoken deferral from context if you can."
+                        }
+                    }
+                    Self.answerLog("sourced EMPTY q=\(question.prefix(80))")
+                }
                 return
             }
             let snippets = hits
@@ -460,17 +484,45 @@ final class AppModel: ObservableObject {
                     self.updateCard(cardID) {
                         $0.sourceFiles = hits.map(\.file)
                         if sourced.isEmpty {
-                            // Hits existed but the model declined to ground an answer.
                             $0.sourceState = .declined
+                            if $0.answer == "Looking up in docs…" {
+                                $0.answer = "Docs matched but didn’t answer this directly."
+                            }
+                            Self.answerLog("sourced DECLINED q=\(question.prefix(80)) files=\(hits.map(\.file).joined(separator: ","))")
                         } else {
                             $0.sourcedAnswer = sourced
                             $0.sourceState = .done
+                            if $0.answer == "Looking up in docs…" {
+                                $0.answer = sourced
+                            }
+                            Self.answerLog("sourced OK q=\(question.prefix(80))")
                         }
                     }
                 }
             } catch {
-                await MainActor.run { self.updateCard(cardID) { $0.sourceState = .failed } }
+                await MainActor.run {
+                    self.updateCard(cardID) { card in
+                        card.sourceState = .failed
+                        if card.answer == "Looking up in docs…" {
+                            card.answer = "Source lookup failed."
+                        }
+                    }
+                    Self.answerLog("sourced FAIL \(error.localizedDescription)")
+                }
             }
+        }
+    }
+
+    private static func answerLog(_ line: String) {
+        let stamped = "\(ISO8601DateFormatter().string(from: Date())) \(line)\n"
+        guard let data = stamped.data(using: .utf8) else { return }
+        let url = URL(fileURLWithPath: "/tmp/cue-answers.log")
+        if let handle = try? FileHandle(forWritingTo: url) {
+            _ = try? handle.seekToEnd()
+            try? handle.write(contentsOf: data)
+            try? handle.close()
+        } else {
+            try? data.write(to: url)
         }
     }
 
@@ -569,7 +621,7 @@ struct AnswerCard: Identifiable, Equatable {
 
     let id = UUID()
     let question: String
-    let answer: String
+    var answer: String
     var sourcedAnswer: String?
     var sourceFiles: [String] = []
     var sourceState: SourceState = .none

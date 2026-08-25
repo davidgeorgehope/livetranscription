@@ -118,14 +118,18 @@ struct SourceSearch {
         let lower = path.lowercased()
         var boost = 0.0
         if lower.contains("/docs/") { boost += 0.05 }
+        if lower.contains("/sand/") { boost += 0.1 }
+        if lower.contains("grok") || lower.contains("grokbot") { boost += 0.12 }
         if lower.contains("origin") { boost += 0.08 }
         if lower.contains("scm-integrations") { boost += 0.06 }
+        // Large review dumps often keyword-match without answering the ask.
+        if lower.contains("origin-code-review") { boost -= 0.12 }
         let name = URL(fileURLWithPath: path).lastPathComponent
         if name.hasSuffix(".wrap.md") {
-            // Distilled call wraps should outrank raw transcript echo.
-            boost += 0.15
+            // Distilled wraps beat raw transcripts, but not product docs.
+            boost += 0.05
         } else if name.hasPrefix("call-") {
-            boost -= 0.2
+            boost -= 0.25
         }
         return boost
     }

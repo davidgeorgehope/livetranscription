@@ -74,15 +74,21 @@ def path_boost(path: str) -> float:
     boost = 0.0
     if "/docs/" in lower:
         boost += 0.05
+    if "/sand/" in lower:
+        boost += 0.1
+    if "grok" in lower or "grokbot" in lower:
+        boost += 0.12
     if "origin" in lower:
         boost += 0.08
     if "scm-integrations" in lower:
         boost += 0.06
+    if "origin-code-review" in lower:
+        boost -= 0.12
     name = Path(path).name
     if name.endswith(".wrap.md"):
-        boost += 0.15
+        boost += 0.05
     elif name.startswith("call-"):
-        boost -= 0.2
+        boost -= 0.25
     return boost
 
 

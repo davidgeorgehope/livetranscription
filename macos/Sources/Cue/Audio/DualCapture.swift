@@ -29,7 +29,10 @@ final class DualCapture {
     // audio, used to reject mic frames that are just speaker bleed.
     private var systemRMS: Float = 0
     private let micNoiseFloor: Float = 0.004
-    private let bleedRatio: Float = 0.6
+    /// Was 0.6 — too aggressive: during a loud Zoom call it zeroed the mic
+    /// stream, so every line became "Customer" and Cue answered the user's
+    /// own questions (or nothing useful). Prefer AEC; gate only clear bleed.
+    private let bleedRatio: Float = 0.28
 
     func start(includeMic: Bool) throws {
         stop()
