@@ -5,6 +5,8 @@ import AppKit
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @State private var showSettings = false
+    @State private var showSessions = false
+    @AppStorage(WindowPin.defaultsKey) private var pinned = false
 
     var body: some View {
         ZStack {
@@ -30,6 +32,23 @@ struct ContentView: View {
             }
             ToolbarItem(placement: .automatic) {
                 Button {
+                    model.refreshSessions()
+                    showSessions = true
+                } label: {
+                    Image(systemName: "list.bullet.rectangle")
+                }
+                .help("Past calls")
+            }
+            ToolbarItem(placement: .automatic) {
+                Button {
+                    pinned.toggle()
+                } label: {
+                    Image(systemName: pinned ? "pin.fill" : "pin")
+                }
+                .help(pinned ? "Stop floating above other apps" : "Keep Cue above other apps during a call")
+            }
+            ToolbarItem(placement: .automatic) {
+                Button {
                     showSettings.toggle()
                 } label: {
                     Image(systemName: "gearshape")
@@ -50,18 +69,44 @@ struct ContentView: View {
             SettingsView()
                 .environmentObject(model)
         }
+        .sheet(isPresented: $showSessions) {
+            SessionsBrowserView()
+                .environmentObject(model)
+        }
+        .sheet(isPresented: $model.showWrapSheet) {
+            if let wrap = model.latestWrap {
+                WrapSheetView(wrap: wrap) {
+                    model.showWrapSheet = false
+                }
+            }
+        }
         .onAppear { model.loadKey() }
+        .onChange(of: pinned) { _, newValue in
+            if let window = NSApp.windows.first(where: { $0.title == "Cue" }) {
+                WindowPin.apply(to: window, pinned: newValue)
+            }
+        }
     }
 
     private var transcriptPane: some View {
         VStack(alignment: .leading, spacing: 10) {
             header("LIVE")
+            Text(rosterStatus)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             LevelMeter(level: model.level, live: model.phase == .listening)
             if let err = model.errorMessage {
                 Text(err)
                     .font(.caption)
-                    .foregroundStyle(.red)
+                    .foregroundStyle(.red.opacity(0.9))
                     .textSelection(.enabled)
+                HStack(spacing: 8) {
+                    Button("System Audio…") { Permissions.openSystemAudioRecordingSettings() }
+                    Button("Microphone…") { Permissions.openMicrophoneSettings() }
+                    Button("Accessibility…") { Permissions.openAccessibilitySettings() }
+                }
+                .font(.caption)
+                .buttonStyle(.bordered)
             }
             ScrollViewReader { proxy in
                 ScrollView {
@@ -75,9 +120,14 @@ struct ContentView: View {
                         }
                         ForEach(model.transcript) { line in
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(line.at.formatted(date: .omitted, time: .standard))
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                                HStack(spacing: 6) {
+                                    Text(line.label.displayName)
+                                        .font(.caption2.weight(.bold))
+                                        .foregroundStyle(line.label.role == .remote ? Color.purple : Color.green)
+                                    Text(line.at.formatted(date: .omitted, time: .standard))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
                                 Text(line.text)
                                     .textSelection(.enabled)
                             }
@@ -104,6 +154,19 @@ struct ContentView: View {
         .padding(16)
     }
 
+    private var rosterStatus: String {
+        switch model.rosterState {
+        case .accessibilityDenied:
+            return "Zoom names need Accessibility — if Cue already shows On, remove it and re-enable (stale grant from an older build)."
+        case .zoomNotRunning:
+            return "Zoom tags: Zoom not running"
+        case .meetingNotDetected:
+            return "Zoom tags: meeting not detected"
+        case .tracking(let participantCount, _):
+            return "Zoom tags: tracking \(participantCount)"
+        }
+    }
+
     private var cuePane: some View {
         VStack(alignment: .leading, spacing: 10) {
             header("SAY THIS")
@@ -128,6 +191,44 @@ struct ContentView: View {
                         }
                     }
                 }
+            }
+            if model.coachingEnabled {
+                header("COACH")
+                if model.coaching.isEmpty {
+                    Text("Coaching notes appear here as the call progresses.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 8) {
+                            ForEach(model.coaching) { note in
+                                CoachingNoteView(note: note) {
+                                    model.dismissCoaching(note)
+                                }
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 180)
+                }
+            }
+            header("TRACK")
+            if model.commitments.isEmpty {
+                Text(model.phase == .listening
+                     ? "Commitments and open questions land here as the call progresses."
+                     : "Start a call to capture commitments.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(model.commitments) { item in
+                            CommitmentRowView(item: item) {
+                                model.dismissCommitment(item)
+                            }
+                        }
+                    }
+                }
+                .frame(maxHeight: 200)
             }
         }
         .padding(16)
@@ -166,10 +267,11 @@ struct AnswerCardView: View {
             Text(card.answer.isEmpty ? "(skipped — not a real question)" : card.answer)
                 .font(.title3.weight(.semibold))
                 .textSelection(.enabled)
+            sourceSection
             HStack {
                 Button("Copy") {
                     NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(card.answer, forType: .string)
+                    NSPasteboard.general.setString(card.sourcedAnswer ?? card.answer, forType: .string)
                 }
                 .buttonStyle(.borderless)
                 Spacer()
@@ -181,6 +283,269 @@ struct AnswerCardView: View {
         .padding(14)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.purple.opacity(0.16)))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.purple.opacity(0.35)))
+    }
+
+    @ViewBuilder
+    private var sourceSection: some View {
+        switch card.sourceState {
+        case .none:
+            EmptyView()
+        case .searching:
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini)
+                Text("Checking knowledge base…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .empty:
+            Text("No matching docs or past calls.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .declined:
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Docs matched but didn’t answer this directly.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if !card.sourceFiles.isEmpty {
+                    Text("Looked at: " + card.sourceFiles.joined(separator: ", "))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .textSelection(.enabled)
+                }
+            }
+        case .failed:
+            Text("Source lookup failed.")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        case .done:
+            VStack(alignment: .leading, spacing: 4) {
+                Divider()
+                Text(card.sourcedAnswer ?? "")
+                    .font(.body.weight(.medium))
+                    .textSelection(.enabled)
+                Text("From: " + card.sourceFiles.joined(separator: ", "))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+}
+
+struct CoachingNoteView: View {
+    let note: CoachingNote
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(note.kind.rawValue.uppercased())
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.orange)
+                Spacer()
+                Button("Dismiss", action: onDismiss)
+                    .buttonStyle(.borderless)
+                    .font(.caption2)
+            }
+            Text(note.content)
+                .font(.callout)
+                .textSelection(.enabled)
+            if let suggestion = note.suggestion, !suggestion.isEmpty {
+                Text(suggestion)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.12)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.orange.opacity(0.3)))
+    }
+}
+
+struct CommitmentRowView: View {
+    let item: CallCommitment
+    let onDismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(item.kind.rawValue.uppercased())
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(color)
+                Text(item.speaker)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Dismiss", action: onDismiss)
+                    .buttonStyle(.borderless)
+                    .font(.caption2)
+            }
+            Text(item.text)
+                .font(.callout)
+                .textSelection(.enabled)
+        }
+        .padding(10)
+        .background(RoundedRectangle(cornerRadius: 10).fill(color.opacity(0.12)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(color.opacity(0.3)))
+    }
+
+    private var color: Color {
+        switch item.kind {
+        case .commitment: return .cyan
+        case .openQuestion: return .yellow
+        case .decision: return .mint
+        }
+    }
+}
+
+@available(macOS 14.2, *)
+struct SessionsBrowserView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        HSplitView {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    Text("Past calls")
+                        .font(.headline)
+                    Spacer()
+                    Button("Refresh") { model.refreshSessions() }
+                    Button("Done") { dismiss() }
+                        .keyboardShortcut(.defaultAction)
+                }
+                .padding(12)
+                Divider()
+                if model.sessions.isEmpty {
+                    Text("No saved transcripts yet. Hit Listen with “Save transcripts” on.")
+                        .foregroundStyle(.secondary)
+                        .padding(16)
+                    Spacer()
+                } else {
+                    List(model.sessions, selection: Binding(
+                        get: { model.selectedSession?.id },
+                        set: { url in
+                            if let url, let session = model.sessions.first(where: { $0.id == url }) {
+                                model.openSession(session)
+                            }
+                        }
+                    )) { session in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack {
+                                Text(session.title)
+                                    .font(.callout.weight(.semibold))
+                                if session.hasWrap {
+                                    Text("WRAP")
+                                        .font(.caption2.weight(.bold))
+                                        .foregroundStyle(.purple)
+                                }
+                            }
+                            Text("\(session.lineCount) lines")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            if !session.preview.isEmpty {
+                                Text(session.preview)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                        }
+                        .tag(session.id)
+                    }
+                }
+            }
+            .frame(minWidth: 260)
+
+            VStack(alignment: .leading, spacing: 0) {
+                if let session = model.selectedSession {
+                    HStack {
+                        Text(session.title)
+                            .font(.headline)
+                        Spacer()
+                        Button("Show in Finder") {
+                            NSWorkspace.shared.activateFileViewerSelecting([session.fileURL])
+                        }
+                    }
+                    .padding(12)
+                    Divider()
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            Text(model.selectedSessionBody)
+                                .font(.system(.body, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            if let wrap = model.selectedSessionWrap, !wrap.isEmpty {
+                                Divider()
+                                Text("Wrap")
+                                    .font(.headline)
+                                Text(wrap)
+                                    .textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                        .padding(16)
+                    }
+                } else {
+                    Text("Select a call to read the full transcript.")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .frame(minWidth: 420)
+        }
+        .frame(width: 900, height: 560)
+        .onAppear {
+            model.refreshSessions()
+            if model.selectedSession == nil, let first = model.sessions.first {
+                model.openSession(first)
+            }
+        }
+    }
+}
+
+struct WrapSheetView: View {
+    let wrap: CallWrap
+    let onDone: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Call wrap")
+                .font(.title2.weight(.semibold))
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Summary")
+                        .font(.headline)
+                    Text(wrap.summary.isEmpty ? "(empty)" : wrap.summary)
+                        .textSelection(.enabled)
+                    if !wrap.commitments.isEmpty {
+                        Text("Commitments & open questions")
+                            .font(.headline)
+                        ForEach(wrap.commitments) { item in
+                            Text("• [\(item.kind.rawValue)] \(item.speaker): \(item.text)")
+                                .textSelection(.enabled)
+                        }
+                    }
+                    Text("Follow-up draft")
+                        .font(.headline)
+                    Text(wrap.followUpDraft.isEmpty ? "(empty)" : wrap.followUpDraft)
+                        .textSelection(.enabled)
+                }
+            }
+            HStack {
+                Button("Copy follow-up") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(wrap.followUpDraft, forType: .string)
+                }
+                Spacer()
+                Button("Done", action: onDone)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 560, height: 520)
     }
 }
 
@@ -207,6 +572,28 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                settingsForm
+                    .padding(24)
+            }
+            Divider()
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") {
+                    model.saveSettings()
+                    dismiss()
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(12)
+        }
+        .frame(width: 560, height: 560)
+    }
+
+    private var settingsForm: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Settings")
                 .font(.title2.weight(.semibold))
@@ -214,6 +601,33 @@ struct SettingsView: View {
             Text("System audio (Zoom/Meet/browser) uses a Core Audio process tap. No BlackHole, no Multi-Output Device.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Toggle("Coaching notes (objections, questions to ask)", isOn: $model.coachingEnabled)
+            Toggle("Save transcripts (searched as part of the knowledge base)", isOn: $model.saveTranscripts)
+            HStack(spacing: 8) {
+                Text(TranscriptStore.sessionsDirectory.path)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Button("Show in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([TranscriptStore.sessionsDirectory])
+                }
+                .font(.caption)
+            }
+            Toggle("Ground answers in a local repo/docs search", isOn: $model.sourceSearchEnabled)
+            if model.sourceSearchEnabled {
+                TextField("Primary knowledge folder", text: $model.sourceRoot)
+                    .textFieldStyle(.roundedBorder)
+                Text("Additional folders (one path per line)")
+                    .font(.headline)
+                TextEditor(text: $model.extraSourceRoots)
+                    .font(.body.monospaced())
+                    .frame(minHeight: 72)
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.12)))
+                Text("Markdown under these paths is searched when a question is detected. Past Cue calls are included automatically when transcript saving is on.\n\nGrok Bot: point an agent at \(TranscriptStore.sessionsDirectory.path) to read Cue transcripts/wraps. To pull Grok Bot notes into Cue, dump markdown somewhere and add that folder above — do not point Cue at ~/.grokbot (daemon config + secrets, not docs).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Text("xAI API key")
                 .font(.headline)
             SecureField("xai-…", text: $model.apiKeyField)
@@ -227,16 +641,6 @@ struct SettingsView: View {
             Text("Paste product facts, pricing you can say, competitive notes. Cue will not invent numbers that aren’t here.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            HStack {
-                Spacer()
-                Button("Save") {
-                    model.saveSettings()
-                    dismiss()
-                }
-                .keyboardShortcut(.defaultAction)
-            }
         }
-        .padding(24)
-        .frame(width: 560, height: 460)
     }
 }

@@ -14,15 +14,15 @@ enum CaptureError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .tapCreate(let s):
-            return "Could not create system audio tap (\(s)). Grant Audio Capture / System Audio Recording for Cue, then retry."
+            return "Could not create system audio tap (\(s)). \(Permissions.staleGrantHelp)"
         case .aggregateCreate(let s):
             return "Could not create aggregate tap device (\(s))."
         case .ioProc(let s):
             return "Could not attach audio callback (\(s))."
         case .start(let s):
-            return "Could not start system audio tap (\(s))."
+            return "Could not start system audio tap (\(s)). \(Permissions.staleGrantHelp)"
         case .micPermission:
-            return "Microphone permission denied."
+            return "Microphone permission denied. Enable Cue under System Settings → Privacy → Microphone."
         case .engine(let s):
             return s
         }

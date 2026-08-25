@@ -27,3 +27,4 @@ secrets/
 macos/.build/
 macos/.swiftpm/
 macos/Cue.app/
+macos.liveanswer-local/
