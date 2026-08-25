@@ -18,31 +18,19 @@ struct CoachingNote: Identifiable, Equatable {
 /// Python v1 coaching engine: only objections needing a response, genuinely
 /// useful questions to ask, and important observations.
 struct CoachingEngine {
-    func analyze(dialogue: String, notes: String, apiKey: String) async throws -> [CoachingNote] {
-        let system = """
-        You are a real-time meeting coach for the "Me" speaker on a live customer call. \
-        Analyze the recent dialogue and provide ONLY high-priority coaching. Be very selective: \
-        most passes should return empty arrays. Do NOT coach on things already handled well.
-
-        Return only valid JSON:
-        {
-          "objections": [{"detected": "objection raised", "response": "suggested response"}],
-          "suggested_questions": [{"question": "question to ask now", "reason": "why"}],
-          "observations": [{"type": "opportunity|warning", "content": "notable observation"}]
-        }
-
-        Rules:
-        - Empty arrays for categories with nothing important.
-        - Prioritize: objections > opportunities > questions.
-        - Do NOT suggest questions just to fill space.
-        - If the user's notes list topics, competitors, or goals, use them.
-        """
+    func analyze(
+        dialogue: String,
+        notes: String,
+        meetingType: MeetingType,
+        apiKey: String
+    ) async throws -> [CoachingNote] {
+        let system = meetingType.coachingSystemPrompt
 
         let user = """
         USER'S NOTES / CALL CONTEXT:
         \(notes.isEmpty ? "(none provided)" : notes)
 
-        RECENT DIALOGUE (Customer = them, Me = the user you are coaching):
+        RECENT DIALOGUE (remote = them, Me = the user you are coaching):
         \(dialogue.suffix(2400))
         """
 

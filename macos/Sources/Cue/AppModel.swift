@@ -38,6 +38,8 @@ final class AppModel: ObservableObject {
     /// to pull in Grok Bot exports or any other local docs dump.
     @Published var extraSourceRoots = ""
     @Published var saveTranscripts = true
+    @Published var meetingType: MeetingType = .sales
+    @Published var askDraft = ""
     @Published var errorMessage: String?
     @Published var lastQuestion: String?
     @Published var rosterState: RosterState = .meetingNotDetected
@@ -76,6 +78,10 @@ final class AppModel: ObservableObject {
         sourceRoot = UserDefaults.standard.string(forKey: "cue.sourceRoot") ?? ""
         extraSourceRoots = UserDefaults.standard.string(forKey: "cue.extraSourceRoots") ?? ""
         saveTranscripts = UserDefaults.standard.object(forKey: "cue.saveTranscripts") as? Bool ?? true
+        if let raw = UserDefaults.standard.string(forKey: "cue.meetingType"),
+           let stored = MeetingType(rawValue: raw) {
+            meetingType = stored
+        }
         roster.onStateChange = { [weak self] state in
             self?.rosterState = state
         }
@@ -135,6 +141,12 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(sourceRoot, forKey: "cue.sourceRoot")
         UserDefaults.standard.set(extraSourceRoots, forKey: "cue.extraSourceRoots")
         UserDefaults.standard.set(saveTranscripts, forKey: "cue.saveTranscripts")
+        UserDefaults.standard.set(meetingType.rawValue, forKey: "cue.meetingType")
+    }
+
+    func setMeetingType(_ type: MeetingType) {
+        meetingType = type
+        UserDefaults.standard.set(type.rawValue, forKey: "cue.meetingType")
     }
 
     func toggleListen() {
@@ -283,6 +295,7 @@ final class AppModel: ObservableObject {
                     dialogue: dialogue,
                     commitments: captured,
                     notes: notes,
+                    meetingType: meetingType,
                     apiKey: key
                 )
                 let title = storeName ?? "call"
@@ -299,6 +312,40 @@ final class AppModel: ObservableObject {
 
     func dismiss(_ card: AnswerCard) {
         cues.removeAll { $0.id == card.id }
+    }
+
+    /// Manual Ask Cue path. Same card pipeline as remote questions, but never
+    /// SKIP-as-non-customer and tagged `.userAsk`.
+    func ask(_ text: String? = nil) {
+        let question = (text ?? askDraft).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty else { return }
+        if apiKeyField.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            loadKey()
+        }
+        guard hasKey else {
+            errorMessage = "Add an xAI API key in Settings first."
+            return
+        }
+        let context = askContext()
+        guard !context.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            statusLine = "Need transcript or session context to answer"
+            return
+        }
+        askDraft = ""
+        lastQuestion = question
+        statusLine = "Ask Cue — drafting…"
+        Task { await draftAnswer(for: question, origin: .userAsk, transcript: context) }
+    }
+
+    private func askContext() -> String {
+        let recent = recentWindow.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !recent.isEmpty { return recent }
+        let session = selectedSessionBody.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !session.isEmpty { return String(session.suffix(4000)) }
+        return transcript
+            .suffix(40)
+            .map { "\($0.label.displayName): \($0.text)" }
+            .joined(separator: "\n")
     }
 
     private func wireSTT() {
@@ -370,35 +417,40 @@ final class AppModel: ObservableObject {
 
         if let question = questions.detect(in: text, recent: recentWindow) {
             FileHandle.standardError.write(Data("cue: question \(question)\n".utf8))
+            lastQuestion = question
+            guard meetingType.autoAnswerRemoteQuestions else { return }
             let normalized = question.lowercased()
             if normalized == lastAnswered, Date().timeIntervalSince(lastAnswerAt) < 20 {
                 return
             }
-            lastQuestion = question
             lastAnswered = normalized
             lastAnswerAt = Date()
             statusLine = "Customer asked — drafting…"
-            Task { await draftAnswer(for: question) }
+            Task { await draftAnswer(for: question, origin: .remoteQuestion, transcript: recentWindow) }
         }
     }
 
-    private func draftAnswer(for question: String) async {
+    private func draftAnswer(for question: String, origin: AnswerOrigin, transcript: String) async {
+        let userAsked = origin == .userAsk
+        let type = meetingType
         do {
             let answer = try await answers.answer(
                 question: question,
-                transcript: recentWindow,
+                transcript: transcript,
                 notes: contextNotes,
+                meetingType: type,
+                userAsked: userAsked,
                 apiKey: apiKeyField
             )
             // Even when the quick model SKIPs, still open a card and run the
             // docs search — empty notes used to abort before grounding ran.
             let display = answer.isEmpty ? "Looking up in docs…" : answer
-            let card = AnswerCard(question: question, answer: display, at: Date())
+            let card = AnswerCard(question: question, answer: display, origin: origin, at: Date())
             cues.insert(card, at: 0)
             if cues.count > 12 { cues.removeLast(cues.count - 12) }
             statusLine = answer.isEmpty ? "Checking docs…" : "Answer ready"
-            Self.answerLog("quick \(answer.isEmpty ? "SKIP" : "ok") q=\(question.prefix(80))")
-            enrichWithSources(cardID: card.id, question: question)
+            Self.answerLog("quick \(answer.isEmpty ? "SKIP" : "ok") origin=\(origin.rawValue) type=\(type.rawValue) q=\(question.prefix(80))")
+            enrichWithSources(cardID: card.id, question: question, origin: origin, transcript: transcript)
         } catch {
             statusLine = "Answer failed: \(error.localizedDescription)"
             Self.answerLog("quick FAIL \(error.localizedDescription)")
@@ -429,7 +481,12 @@ final class AppModel: ObservableObject {
 
     /// Second stage: search the local knowledge repo for the question and,
     /// if snippets are found, update the card with a grounded answer.
-    private func enrichWithSources(cardID: UUID, question: String) {
+    private func enrichWithSources(
+        cardID: UUID,
+        question: String,
+        origin: AnswerOrigin,
+        transcript dialogue: String
+    ) {
         guard sourceSearchEnabled else {
             // Quick path said "Looking up…" but search is off — clear placeholder.
             updateCard(cardID) { card in
@@ -453,7 +510,8 @@ final class AppModel: ObservableObject {
         let notes = contextNotes
         let key = apiKeyField
         let engine = answers
-        let dialogue = recentWindow
+        let type = meetingType
+        let userAsked = origin == .userAsk
         let exclude = Set([transcriptStore?.fileURL.lastPathComponent].compactMap { $0 })
         Task.detached(priority: .utility) { [weak self] in
             var search = SourceSearch(roots: roots)
@@ -478,7 +536,7 @@ final class AppModel: ObservableObject {
             do {
                 let sourced = try await engine.sourcedAnswer(
                     question: question, snippets: snippets, notes: notes,
-                    transcript: dialogue, apiKey: key
+                    transcript: dialogue, meetingType: type, userAsked: userAsked, apiKey: key
                 )
                 await MainActor.run {
                     self.updateCard(cardID) {
@@ -542,10 +600,13 @@ final class AppModel: ObservableObject {
         let dialogue = recentWindow
         let notes = contextNotes
         let key = apiKeyField
+        let type = meetingType
         Task {
             defer { coachingInFlight = false }
             do {
-                let new = try await coach.analyze(dialogue: dialogue, notes: notes, apiKey: key)
+                let new = try await coach.analyze(
+                    dialogue: dialogue, notes: notes, meetingType: type, apiKey: key
+                )
                 let fresh = new.filter { note in
                     !coaching.contains { $0.content == note.content }
                 }
@@ -622,6 +683,7 @@ struct AnswerCard: Identifiable, Equatable {
     let id = UUID()
     let question: String
     var answer: String
+    var origin: AnswerOrigin = .remoteQuestion
     var sourcedAnswer: String?
     var sourceFiles: [String] = []
     var sourceState: SourceState = .none

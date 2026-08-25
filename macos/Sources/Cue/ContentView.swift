@@ -169,17 +169,36 @@ struct ContentView: View {
 
     private var cuePane: some View {
         VStack(alignment: .leading, spacing: 10) {
-            header("SAY THIS")
+            HStack {
+                Text("SAY THIS")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .tracking(1.6)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Picker("Meeting", selection: Binding(
+                    get: { model.meetingType },
+                    set: { model.setMeetingType($0) }
+                )) {
+                    ForEach(MeetingType.allCases) { type in
+                        Text(type.title).tag(type)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 280)
+                .labelsHidden()
+                .accessibilityLabel("Meeting type")
+            }
+            askRow
             if model.cues.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Customer questions land here as short answers you can read out.")
+                    Text(model.meetingType.emptyStateCopy)
                         .foregroundStyle(.secondary)
                     if let q = model.lastQuestion {
                         Text("Last heard: \(q)")
                             .font(.callout)
                     }
                 }
-                .padding(.top, 20)
+                .padding(.top, 12)
                 Spacer()
             } else {
                 ScrollView {
@@ -235,6 +254,21 @@ struct ContentView: View {
         .background(Color.white.opacity(0.03))
     }
 
+    private var askRow: some View {
+        HStack(spacing: 8) {
+            TextField("Ask Cue…", text: $model.askDraft)
+                .textFieldStyle(.roundedBorder)
+                .disabled(!model.hasKey)
+                .onSubmit { model.ask() }
+            Button("Ask") { model.ask() }
+                .buttonStyle(.borderedProminent)
+                .disabled(!model.hasKey || model.askDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .keyboardShortcut(.return, modifiers: [.command])
+        }
+        .opacity(model.hasKey ? 1 : 0.55)
+        .help(model.hasKey ? "Ask Cue using recent transcript or selected session" : "Add an xAI API key in Settings")
+    }
+
     private func header(_ title: String) -> some View {
         HStack {
             Text(title)
@@ -264,6 +298,11 @@ struct AnswerCardView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .textSelection(.enabled)
+            if card.origin == .userAsk {
+                Text("ASK")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.cyan)
+            }
             Text(card.answer.isEmpty ? "(skipped — not a real question)" : card.answer)
                 .font(.title3.weight(.semibold))
                 .textSelection(.enabled)
@@ -597,6 +636,20 @@ struct SettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Settings")
                 .font(.title2.weight(.semibold))
+            Picker("Meeting type", selection: Binding(
+                get: { model.meetingType },
+                set: { model.setMeetingType($0) }
+            )) {
+                ForEach(MeetingType.allCases) { type in
+                    Text(type.title).tag(type)
+                }
+            }
+            .pickerStyle(.segmented)
+            Text(model.meetingType.autoAnswerRemoteQuestions
+                 ? "Sales auto-opens SAY THIS cards from remote questions."
+                 : "Remote questions do not auto-card; use Ask Cue.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             Toggle("Also capture microphone (you + them if they’re in the room)", isOn: $model.includeMic)
             Text("System audio (Zoom/Meet/browser) uses a Core Audio process tap. No BlackHole, no Multi-Output Device.")
                 .font(.caption)

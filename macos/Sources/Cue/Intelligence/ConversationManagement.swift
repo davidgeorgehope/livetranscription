@@ -101,12 +101,18 @@ struct CommitmentExtractor {
 }
 
 struct CallWrapEngine {
-    func wrap(dialogue: String, commitments: [CallCommitment], notes: String, apiKey: String) async throws -> CallWrap {
+    func wrap(
+        dialogue: String,
+        commitments: [CallCommitment],
+        notes: String,
+        meetingType: MeetingType = .sales,
+        apiKey: String
+    ) async throws -> CallWrap {
         let system = """
-        You write a post-call wrap for the seller. Return only valid JSON:
+        \(meetingType.wrapFlavor) Return only valid JSON:
         {
           "summary": "5-8 sentence narrative of what happened and where things stand",
-          "follow_up": "a short follow-up email draft the seller can send, with subject line on first line as Subject: ..."
+          "follow_up": "a short follow-up email draft the user can send, with subject line on first line as Subject: ..."
         }
         Use only the dialogue and listed commitments. Do not invent product claims.
         """
