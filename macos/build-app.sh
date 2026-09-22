@@ -7,9 +7,14 @@ swift build -c release
 app="Cue.app"
 contents="$app/Contents"
 macos="$contents/MacOS"
-mkdir -p "$macos"
+resources="$contents/Resources"
+mkdir -p "$macos" "$resources"
 cp .build/release/Cue "$macos/Cue"
 chmod +x "$macos/Cue"
+
+if [[ -f Resources/AppIcon.icns ]]; then
+  cp Resources/AppIcon.icns "$resources/AppIcon.icns"
+fi
 
 cat > "$contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -26,6 +31,8 @@ cat > "$contents/Info.plist" <<'PLIST'
   <string>Cue</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundleShortVersionString</key>
   <string>0.2.0</string>
   <key>CFBundleVersion</key>
@@ -44,7 +51,7 @@ cat > "$contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-# Prefer a stable local codesigning cert so System Audio / Accessibility
+# Prefer a stable local codesigning cert so System Audio Recording
 # grants survive rebuilds. Ad-hoc (`-`) changes CDHash every build and leaves
 # ghost "enabled" Cue rows in System Settings.
 chmod +x scripts/ensure-codesign-identity.sh

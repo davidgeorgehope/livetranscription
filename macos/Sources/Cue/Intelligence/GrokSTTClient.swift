@@ -2,6 +2,14 @@ import Foundation
 
 /// Live Grok speech-to-text over `wss://api.x.ai/v1/stt`.
 /// Sends 16 kHz mono PCM16 frames; emits interim + utterance-final text.
+///
+/// Turn boundaries come from the server's Smart Turn model: `speech_final`
+/// fires when it judges the speaker has finished a thought (or after
+/// `smart_turn_timeout` of silence). `is_final` without `speech_final` is a
+/// chunk final — text locked every ~3s of speech, *not* a boundary — so those
+/// accumulate and are emitted together as one utterance. A local silence timer,
+/// deliberately longer than the server timeout, is only a safety net for a
+/// stalled stream; `transcript.done` and `stop()` flush whatever is left.
 @available(macOS 14.2, *)
 final class GrokSTTClient: NSObject, URLSessionWebSocketDelegate {
     var onPartial: ((String) -> Void)?
@@ -16,7 +24,23 @@ final class GrokSTTClient: NSObject, URLSessionWebSocketDelegate {
     private let lock = NSLock()
     private var closed = true
     private var connectWatch: DispatchWorkItem?
+    private var silenceCommit: DispatchWorkItem?
+    private var lastPartial = ""
     private var lastFinal = ""
+    /// Chunk-final segments of the utterance in progress (Smart Turn demotes
+    /// mid-thought pauses to these). Joined with the closing text on `speech_final`.
+    private var lockedChunks: [String] = []
+    /// Safety net only: must exceed `smartTurnTimeoutMs` so the server, not this
+    /// timer, decides where a turn ends.
+    private let commitSilence: TimeInterval = 3.5
+    /// 0.5 catches most natural endings; 0.7 is dictation-grade. Conversation
+    /// sits between: end the turn when fairly sure, but ride out "um… so".
+    static let smartTurnThreshold = "0.6"
+    static let smartTurnTimeoutMs = "2500"
+
+    /// Pinned: the endpoint defaults to grok-voice-transcribe-1.0 when `model`
+    /// is omitted, so a newer transcribe model is only used if named here.
+    static let model = "grok-voice-transcribe-2.0"
 
     func start(apiKey: String, keyterms: [String] = []) {
         stop()
@@ -24,14 +48,19 @@ final class GrokSTTClient: NSObject, URLSessionWebSocketDelegate {
         ready = false
         pending = Data()
         lastFinal = ""
+        lastPartial = ""
+        lockedChunks = []
 
         var items: [URLQueryItem] = [
+            .init(name: "model", value: Self.model),
             .init(name: "sample_rate", value: "16000"),
             .init(name: "encoding", value: "pcm"),
             .init(name: "interim_results", value: "true"),
-            .init(name: "language", value: "en")
+            .init(name: "language", value: "en"),
+            .init(name: "smart_turn", value: Self.smartTurnThreshold),
+            .init(name: "smart_turn_timeout", value: Self.smartTurnTimeoutMs),
         ]
-        for term in keyterms.prefix(8) {
+        for term in keyterms.prefix(100) {
             let trimmed = term.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty, trimmed.count <= 50 {
                 items.append(.init(name: "keyterm", value: trimmed))
@@ -85,6 +114,10 @@ final class GrokSTTClient: NSObject, URLSessionWebSocketDelegate {
     }
 
     func stop() {
+        // Commit whatever we were still showing as a live partial.
+        silenceCommit?.cancel()
+        silenceCommit = nil
+        flushPartialAsFinal()
         closed = true
         ready = false
         connectWatch?.cancel()
@@ -94,6 +127,7 @@ final class GrokSTTClient: NSObject, URLSessionWebSocketDelegate {
         task = nil
         session = nil
         pending = Data()
+        lastPartial = ""
     }
 
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol proto: String?) {
@@ -106,6 +140,8 @@ final class GrokSTTClient: NSObject, URLSessionWebSocketDelegate {
         let why = reason.flatMap { String(data: $0, encoding: .utf8) } ?? ""
         log("close \(closeCode.rawValue) \(why)")
         if !closed {
+            // Unexpected close — keep any in-flight words.
+            flushPartialAsFinal()
             onError?("Grok STT closed (\(closeCode.rawValue))")
         }
     }
@@ -113,7 +149,10 @@ final class GrokSTTClient: NSObject, URLSessionWebSocketDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let error {
             log("complete \(error.localizedDescription)")
-            if !closed { onError?("STT: \(error.localizedDescription)") }
+            if !closed {
+                flushPartialAsFinal()
+                onError?("STT: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -124,6 +163,7 @@ final class GrokSTTClient: NSObject, URLSessionWebSocketDelegate {
             case .failure(let error):
                 self.log("recv fail \(error.localizedDescription)")
                 if !self.closed {
+                    self.flushPartialAsFinal()
                     self.onError?("STT socket: \(error.localizedDescription)")
                 }
             case .success(let message):
@@ -143,35 +183,101 @@ final class GrokSTTClient: NSObject, URLSessionWebSocketDelegate {
         @unknown default:
             return
         }
-        log("msg \(text.prefix(160))")
         guard let data = text.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let type = obj["type"] as? String
-        else { return }
+        else {
+            log("msg (unparsed) \(text.prefix(160))")
+            return
+        }
 
         switch type {
         case "transcript.created":
+            log("created id=\(obj["id"] as? String ?? "?")")
             flushPending()
             onStatus?("Listening for customer questions…")
         case "transcript.partial":
-            let spoken = (obj["text"] as? String)?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            guard !spoken.isEmpty else { return }
+            let spoken = ((obj["text"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
             let isFinal = obj["is_final"] as? Bool ?? false
             let speechFinal = obj["speech_final"] as? Bool ?? false
-            onPartial?(spoken)
-            if speechFinal || isFinal {
-                emitFinal(spoken)
+            let eot = obj["end_of_turn_confidence"] as? Double
+            log("partial final=\(isFinal) speech=\(speechFinal) eot=\(eot.map { String(format: "%.2f", $0) } ?? "-") chunks=\(lockedChunks.count) chars=\(spoken.count) text=\(spoken.prefix(100))")
+
+            if !spoken.isEmpty {
+                if speechFinal {
+                    emitFinal(stitched(closing: spoken))
+                } else if isFinal {
+                    // Chunk final: locked text, but the thought continues.
+                    appendChunk(spoken)
+                    lastPartial = ""
+                    onPartial?(lockedChunks.joined(separator: " "))
+                    scheduleSilenceCommit()
+                } else {
+                    lastPartial = spoken
+                    onPartial?((lockedChunks + [spoken]).joined(separator: " "))
+                    scheduleSilenceCommit()
+                }
+                return
+            }
+
+            // Empty text with a final flag: end-of-turn on a quiet channel, or a
+            // chunk boundary with nothing new. Only speech_final closes the turn.
+            if speechFinal {
+                flushPartialAsFinal()
+            } else if isFinal, !lastPartial.isEmpty {
+                appendChunk(lastPartial)
+                lastPartial = ""
             }
         case "transcript.done":
-            if let spoken = obj["text"] as? String {
-                emitFinal(spoken)
+            let spoken = ((obj["text"] as? String) ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            log("done chars=\(spoken.count) text=\(spoken.prefix(100))")
+            if !spoken.isEmpty {
+                emitFinal(stitched(closing: spoken))
+            } else {
+                flushPartialAsFinal()
             }
         case "error":
             onError?(obj["message"] as? String ?? "Grok STT error")
         default:
-            break
+            log("msg \(type)")
         }
+    }
+
+    private func scheduleSilenceCommit() {
+        silenceCommit?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.flushPartialAsFinal()
+        }
+        silenceCommit = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + commitSilence, execute: work)
+    }
+
+    private func flushPartialAsFinal() {
+        silenceCommit?.cancel()
+        silenceCommit = nil
+        let text = (lockedChunks + [lastPartial]).filter { !$0.isEmpty }.joined(separator: " ")
+        guard !text.isEmpty else { return }
+        emitFinal(text)
+    }
+
+    /// Chunk-final text is usually just the new segment, but tolerate a
+    /// cumulative server: if it already contains the previous chunk, replace.
+    private func appendChunk(_ text: String) {
+        if let last = lockedChunks.last, text.count > last.count, text.hasPrefix(String(last.prefix(24))) {
+            lockedChunks[lockedChunks.count - 1] = text
+        } else {
+            lockedChunks.append(text)
+        }
+    }
+
+    /// The utterance to emit when the server closes a turn: the stitched text
+    /// if the server sent it, otherwise our locked chunks plus the closing segment.
+    private func stitched(closing: String) -> String {
+        guard let first = lockedChunks.first else { return closing }
+        if closing.hasPrefix(String(first.prefix(24))) { return closing }
+        return (lockedChunks + [closing]).joined(separator: " ")
     }
 
     /// The server can finalize the same utterance twice (an `is_final`
@@ -180,7 +286,11 @@ final class GrokSTTClient: NSObject, URLSessionWebSocketDelegate {
     private func emitFinal(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != lastFinal else { return }
+        silenceCommit?.cancel()
+        silenceCommit = nil
         lastFinal = trimmed
+        lastPartial = ""
+        lockedChunks = []
         onFinal?(trimmed)
     }
 

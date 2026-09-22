@@ -10,7 +10,7 @@ enum AudioSource: String {
 /// Captures Core Audio process-tap system audio and (optionally) the
 /// microphone as two separate streams, emitting tagged 16 kHz mono PCM16
 /// frames per source. Keeping the streams apart is what makes speaker
-/// attribution (Customer vs Me) possible downstream.
+/// attribution (Them vs Me) possible downstream.
 @available(macOS 14.2, *)
 final class DualCapture {
     var onPCM16: ((AudioSource, Data) -> Void)?
@@ -21,6 +21,7 @@ final class DualCapture {
     private let lock = NSLock()
     private var pending: [AudioSource: [Float]] = [.system: [], .mic: []]
     private var micOnly = false
+    private var echoCancellation = true
     private var running = false
     private let targetRate: Double = 16_000
     private let frameSamples = 1_600 // 100ms at 16 kHz
@@ -30,14 +31,15 @@ final class DualCapture {
     private var systemRMS: Float = 0
     private let micNoiseFloor: Float = 0.004
     /// Was 0.6 — too aggressive: during a loud Zoom call it zeroed the mic
-    /// stream, so every line became "Customer" and Cue answered the user's
+    /// stream, so every line became "Them" and Cue answered the user's
     /// own questions (or nothing useful). Prefer AEC; gate only clear bleed.
     private let bleedRatio: Float = 0.28
 
-    func start(includeMic: Bool) throws {
+    func start(includeMic: Bool, echoCancellation: Bool = true) throws {
         stop()
         running = true
         micOnly = ProcessInfo.processInfo.environment["CUE_MIC_ONLY"] == "1"
+        self.echoCancellation = echoCancellation
 
         tap.onPCM = { [weak self] ptr, frames, rate in
             guard let self else { return }
@@ -85,15 +87,21 @@ final class DualCapture {
         // Echo cancellation: without this, the mic hears the customer through
         // the speakers and their speech gets attributed to "Me". Apple's voice
         // processing subtracts the system output reference from the mic signal.
-        do {
-            try input.setVoiceProcessingEnabled(true)
-            if #available(macOS 14.0, *) {
-                input.voiceProcessingOtherAudioDuckingConfiguration =
-                    .init(enableAdvancedDucking: false, duckingLevel: .min)
+        // Trade-off: VoiceProcessingIO ducks other audio (Zoom/speaker volume)
+        // and runs AGC that can crush mic levels — hence the settings toggle.
+        if echoCancellation {
+            do {
+                try input.setVoiceProcessingEnabled(true)
+                if #available(macOS 14.0, *) {
+                    input.voiceProcessingOtherAudioDuckingConfiguration =
+                        .init(enableAdvancedDucking: false, duckingLevel: .min)
+                }
+                Self.diagLog("mic voice processing (AEC) on")
+            } catch {
+                Self.diagLog("AEC unavailable: \(error.localizedDescription)")
             }
-            Self.diagLog("mic voice processing (AEC) on")
-        } catch {
-            Self.diagLog("AEC unavailable: \(error.localizedDescription)")
+        } else {
+            Self.diagLog("mic voice processing (AEC) off")
         }
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0 else {

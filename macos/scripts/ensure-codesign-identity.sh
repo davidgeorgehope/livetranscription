@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Ensure a stable local codesigning identity named "Cue Local Codesign".
 # Ad-hoc signatures change CDHash every rebuild; macOS then treats Cue as a
-# new app for System Audio Recording / Accessibility, so Settings shows the
+# new app for System Audio Recording, so Settings shows the
 # old Cue as enabled while the new binary keeps prompting.
 set -euo pipefail
 

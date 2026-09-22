@@ -29,6 +29,8 @@ STOPWORDS = {
     "make", "makes", "made", "use", "using", "used", "see", "seen", "still",
     "now", "well", "good", "great", "back", "out", "one", "two", "let", "lets",
     "here", "been", "being", "its", "his", "her", "him", "she", "from",
+    "walk", "through", "click", "clicks", "show", "tell", "please", "help",
+    "next", "step", "steps", "guide", "setup", "setting", "settings",
 }
 
 # Synthetic samples only — never commit real call questions.
@@ -72,23 +74,62 @@ def rg(args: list[str], timeout: float = 4.0) -> str:
 def path_boost(path: str) -> float:
     lower = path.lower()
     boost = 0.0
+    if "internal-docs" in lower:
+        boost += 0.2
+    if "/portal/" in lower:
+        boost += 0.15
     if "/docs/" in lower:
-        boost += 0.05
-    if "/sand/" in lower:
+        boost += 0.08
+    if "cue/knowledge" in lower:
+        boost += 0.25
+    if "/playbook/" in lower:
+        boost += 0.15
+    if "/product-docs/" in lower:
+        boost += 0.35
+    if "/grok-bot-internal/" in lower:
+        boost += 0.3
+    if "/prep/current/" in lower:
+        boost += 0.6
+    elif "/cue/prep/" in lower:
+        boost += 0.2
+    if "/sand/" in lower and "/docs/" in lower:
+        boost += 0.12
+    if "cloud.md" in lower:
         boost += 0.1
     if "grok" in lower or "grokbot" in lower:
-        boost += 0.12
-    if "origin" in lower:
-        boost += 0.08
+        boost += 0.15
+    if "signin" in lower or "sign-in" in lower or "sign_in" in lower:
+        boost += 0.2
+    if "origin" in lower and "origin-code-review" not in lower:
+        boost += 0.06
     if "scm-integrations" in lower:
         boost += 0.06
     if "origin-code-review" in lower:
-        boost -= 0.12
-    name = Path(path).name
+        boost -= 0.15
+    if "__snapshots__" in lower:
+        boost -= 0.5
+    if "/i18n" in lower:
+        boost -= 0.4
+    if lower.endswith(".generated.md"):
+        boost -= 0.45
+    name = Path(path).name.lower()
+    if name in {"index.md", "components.md", "dashboard.md", "readme.md"}:
+        boost -= 0.18
     if name.endswith(".wrap.md"):
-        boost += 0.05
+        boost += 0.08
     elif name.startswith("call-"):
-        boost -= 0.25
+        boost -= 0.2
+    return boost
+
+
+def basename_keyword_boost(path: str, kws: list[str]) -> float:
+    name = Path(path).name.lower()
+    boost = 0.0
+    for kw in kws:
+        if len(kw) >= 3 and kw in name:
+            boost += 0.35
+    if "grok" in kws and "bot" in kws and "grok" in name and "bot" in name:
+        boost += 0.4
     return boost
 
 
@@ -142,10 +183,21 @@ def search(question: str, roots: list[str], exclude: set[str] | None = None) -> 
         }
 
     scores: dict[str, float] = {}
+    matched: dict[str, int] = {}
+    kept_kws = [k for k, _ in keyword_files]
     for _, files in keyword_files:
         weight = 1.0 / len(files)
         for path in files:
-            scores[path] = scores.get(path, 0.0) + weight + path_boost(path)
+            matched[path] = matched.get(path, 0) + 1
+            scores[path] = (
+                scores.get(path, 0.0)
+                + weight
+                + path_boost(path)
+                + basename_keyword_boost(path, kept_kws)
+            )
+    # Mirrors SourceSearch: one shared word is not evidence in a small corpus.
+    if len(kept_kws) >= 2:
+        scores = {p: s for p, s in scores.items() if matched[p] >= 2}
 
     top = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))[:4]
     snippet_kws = sorted(keyword_files, key=lambda kf: len(kf[1]))[:3]
@@ -180,8 +232,9 @@ def search(question: str, roots: list[str], exclude: set[str] | None = None) -> 
 def main() -> int:
     # Override with CUE_SOURCE_ROOT; otherwise only past Cue sessions if present.
     roots: list[str] = []
-    if root := os.environ.get("CUE_SOURCE_ROOT", "").strip():
-        roots.append(str(Path(root).expanduser()))
+    for root in os.environ.get("CUE_SOURCE_ROOT", "").split(":"):
+        if root.strip():
+            roots.append(str(Path(root.strip()).expanduser()))
     sessions = Path("~/Library/Application Support/Cue/sessions").expanduser()
     if sessions.exists():
         roots.append(str(sessions))
