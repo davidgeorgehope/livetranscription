@@ -1,13 +1,13 @@
 # Cue — native live answers
 
-Native macOS app. Listens to **system audio** with a Core Audio process tap (Zoom / Meet / browser). No BlackHole, no Multi-Output Device, no ffmpeg.
+Native macOS app. Listens to **system audio** with a Core Audio process tap (Zoom / Meet / browser) and to your **microphone** as a separate stream. No BlackHole, no Multi-Output Device, no ffmpeg.
 
 Purpose: hear a customer question and put a **short, speakable answer** on screen in a few seconds.
 
 ## What it does
 
 - Taps system audio via `CATapDescription` + private aggregate device (macOS 14.2+)
-- Optional microphone mix if you want the room as well
+- Microphone as its own always-on stream ("Me"): a plain input tap with no voice processing, so Cue never ducks or re-gains the call. The engine rebuilds itself when the input device changes. On speakers the mic also hears the call; headphones keep "Me" clean
 - Live Grok Voice STT (`wss://api.x.ai/v1/stt`, 16 kHz PCM, pinned to `grok-voice-transcribe-2.0` — the endpoint defaults to 1.0 if no model is named). Smart Turn (`smart_turn=0.6`, 2.5 s timeout) decides where a thought ends instead of a fixed silence timer, so a mid-sentence "um…" no longer splits a line. Up to 100 keyterms go with each session: a built-in product/security vocabulary plus proper nouns from your notes and this call's prep
 - Meeting types: **Technical** (default — SA calls: architecture, security, integration; trusts `internal-docs/` and code above the playbook and marks internal-only detail), Sales, Interview, Internal
 - **Context cards** (Technical and Internal): when someone names a customer, feature, system, or incident in passing, Cue retrieves what it already knows (prep, playbook, docs, past calls) and cards it — only if retrieval finds specific facts; otherwise nothing appears. Internal meetings also card any factual question nobody answered.
@@ -29,7 +29,7 @@ open ~/Applications/Cue.app
 
 App icon: Grok Imagine art in `Resources/AppIcon.icns`. Regenerate with `./scripts/generate_icon.sh` then rebuild.
 
-First Listen: grant **Audio Capture / System Audio Recording** (and Microphone if you enabled it).
+First Listen: grant **Audio Capture / System Audio Recording** and **Microphone**.
 
 Cmd+L starts/stops listening.
 

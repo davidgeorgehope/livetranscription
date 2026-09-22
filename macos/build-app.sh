@@ -44,7 +44,7 @@ cat > "$contents/Info.plist" <<'PLIST'
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Cue uses the microphone only if you enable it, so it can hear you and the room as well as system audio.</string>
+  <string>Cue records your side of the call from the microphone so the transcript has both speakers.</string>
   <key>NSAudioCaptureUsageDescription</key>
   <string>Cue captures system audio from Zoom/Meet/browser so it can hear the customer and cue answers. Audio stays on this Mac except for transcription/answer API calls you enable.</string>
 </dict>

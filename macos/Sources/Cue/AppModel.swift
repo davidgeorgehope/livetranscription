@@ -59,10 +59,6 @@ final class AppModel: ObservableObject {
     private static let autoStopCountdown: TimeInterval = 30
     @Published var contextNotes = ""
     @Published var apiKeyField = ""
-    @Published var includeMic = true
-    /// Apple VoiceProcessingIO (AEC). Keeps speaker bleed out of the mic track,
-    /// but ducks other-app volume and runs AGC — off by default for that reason.
-    @Published var echoCancellation = false
     @Published var coachingEnabled = true
     @Published var sourceSearchEnabled = true
     @Published var sourceRoot = ""
@@ -114,8 +110,6 @@ final class AppModel: ObservableObject {
         } else {
             contextNotes = UserDefaults.standard.string(forKey: "cue.context") ?? ""
         }
-        includeMic = UserDefaults.standard.object(forKey: "cue.includeMic") as? Bool ?? true
-        echoCancellation = UserDefaults.standard.object(forKey: "cue.echoCancellation") as? Bool ?? false
         coachingEnabled = UserDefaults.standard.object(forKey: "cue.coaching") as? Bool ?? true
         sourceSearchEnabled = UserDefaults.standard.object(forKey: "cue.sourceSearch") as? Bool ?? true
         sourceRoot = UserDefaults.standard.string(forKey: "cue.sourceRoot") ?? ""
@@ -157,7 +151,6 @@ final class AppModel: ObservableObject {
             self?.loadKey()
             if ProcessInfo.processInfo.environment["CUE_AUTOSTART"] == "1" {
                 FileHandle.standardError.write(Data("cue: autostart requested hasKey=\(self?.hasKey ?? false)\n".utf8))
-                self?.includeMic = ProcessInfo.processInfo.environment["CUE_MIC_ONLY"] == "1"
                 self?.start()
             }
         }
@@ -214,8 +207,6 @@ final class AppModel: ObservableObject {
             }
         }
         UserDefaults.standard.set(contextNotes, forKey: "cue.context")
-        UserDefaults.standard.set(includeMic, forKey: "cue.includeMic")
-        UserDefaults.standard.set(echoCancellation, forKey: "cue.echoCancellation")
         UserDefaults.standard.set(coachingEnabled, forKey: "cue.coaching")
         UserDefaults.standard.set(sourceSearchEnabled, forKey: "cue.sourceSearch")
         UserDefaults.standard.set(sourceRoot, forKey: "cue.sourceRoot")
@@ -317,11 +308,17 @@ final class AppModel: ObservableObject {
             case .mic: self?.sttMe.sendPCM16(data)
             }
         }
+        capture.onMicTrouble = { [weak self] message in
+            DispatchQueue.main.async {
+                guard let self, self.phase == .listening else { return }
+                self.errorMessage = message
+            }
+        }
         FileHandle.standardError.write(Data("cue: start() connecting STT\n".utf8))
         let key = resolvedAPIKey
         sttCustomer.start(apiKey: key, keyterms: keyterms(from: contextNotes))
         // In mic-only test mode the mic feeds the customer stream instead.
-        if includeMic, ProcessInfo.processInfo.environment["CUE_MIC_ONLY"] != "1" {
+        if ProcessInfo.processInfo.environment["CUE_MIC_ONLY"] != "1" {
             sttMe.start(apiKey: key, keyterms: keyterms(from: contextNotes))
         }
         Task.detached { [weak self] in
@@ -330,25 +327,24 @@ final class AppModel: ObservableObject {
     }
 
     private func beginCapture() async {
-        let (wantMic, wantAEC) = await MainActor.run { (includeMic, echoCancellation) }
-        if wantMic {
-            let granted = await requestMicIfNeeded()
-            if !granted {
-                await MainActor.run {
-                    stopSTT()
-                    phase = .error
-                    errorMessage = CaptureError.micPermission.localizedDescription
-                    statusLine = "Capture failed"
-                }
-                return
+        let granted = await requestMicIfNeeded()
+        if !granted {
+            await MainActor.run {
+                stopSTT()
+                phase = .error
+                errorMessage = CaptureError.micPermission.localizedDescription
+                statusLine = "Capture failed"
             }
+            return
         }
         do {
             FileHandle.standardError.write(Data("cue: starting capture off-main\n".utf8))
-            try capture.start(includeMic: wantMic, echoCancellation: wantAEC)
+            try capture.start()
             FileHandle.standardError.write(Data("cue: capture started\n".utf8))
         } catch {
             await MainActor.run {
+                // The tap may already be running when the mic fails to start.
+                capture.stop()
                 stopSTT()
                 phase = .error
                 errorMessage = error.localizedDescription

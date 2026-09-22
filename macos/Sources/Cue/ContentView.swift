@@ -1050,16 +1050,7 @@ struct SettingsView: View {
                  : "Remote questions do not auto-card; use Ask Cue.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Toggle("Also capture microphone (you + them if they’re in the room)", isOn: $model.includeMic)
-            if model.includeMic {
-                Toggle("Echo cancellation", isOn: $model.echoCancellation)
-                Text(model.echoCancellation
-                     ? "Uses Apple voice processing so Zoom through speakers doesn’t land on “Me”. Can duck speaker/mic volume — turn off if levels collapse. Applies on next Listen."
-                     : "Off: system volume stays alone. Relies on the bleed gate; turn on if customer speech shows up as “Me”. Applies on next Listen.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            Text("System audio (Zoom/Meet/browser) uses a Core Audio process tap. No BlackHole, no Multi-Output Device.")
+            Text("“Me” is your microphone, always on; “Them” is system audio (Zoom/Meet/browser) from a Core Audio process tap. No BlackHole, no Multi-Output Device. On speakers your mic hears the call too — headphones keep “Me” clean.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Toggle("Coaching notes (objections, questions to ask)", isOn: $model.coachingEnabled)
