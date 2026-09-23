@@ -41,6 +41,8 @@ Needs an **xAI API key** (console.x.ai). Resolution order:
 
 ```bash
 cp .env.example .env   # from repo root
+# New laptop: keep the clone at ~/Projects/livetranscription (or set cwd to the
+# repo when launching) so DotEnv can find .env; see Sources/Cue/DotEnv.swift.
 # edit XAI_API_KEY=...
 ```
 

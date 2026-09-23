@@ -11,6 +11,10 @@ dist/
 build/
 sessions/
 chunks/
+prep/
+knowledge/
+replays/
+transcripts/
 .env
 .env.*
 !.env.example
