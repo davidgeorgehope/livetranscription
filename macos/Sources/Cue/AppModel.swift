@@ -1036,6 +1036,7 @@ final class AppModel: ObservableObject {
         let line = TranscriptLine(speaker: speaker, text: text, at: date)
         transcript.append(line)
         lastLineAt = Date()
+        if case .callMaybeOver = callHint { callHint = nil }
         if transcript.count > 80 { transcript.removeFirst(transcript.count - 80) }
         transcriptStore?.append(speaker: speaker.rawValue, text: text, at: line.at)
 
@@ -1052,9 +1053,12 @@ final class AppModel: ObservableObject {
     private func duplicateIndex(of text: String, from speaker: Speaker, at date: Date) -> Int? {
         let newTokens = Self.echoTokens(text)
         guard !newTokens.isEmpty else { return nil }
+        // Wall-clock ingest dates compress under replay; keep the window in
+        // call time so 3–4x does not collapse spaced acknowledgements.
+        let window: TimeInterval = replayTask == nil ? 6 : 6 / replaySpeed
         for idx in transcript.indices.reversed() {
             let line = transcript[idx]
-            if date.timeIntervalSince(line.at) > 6 { break }
+            if date.timeIntervalSince(line.at) > window { break }
             let oldTokens = Self.echoTokens(line.text)
             guard !oldTokens.isEmpty else { continue }
             let overlap = newTokens.intersection(oldTokens).count
