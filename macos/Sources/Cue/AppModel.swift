@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 import Combine
@@ -46,6 +47,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var wrapSend: WrapSendState = .idle
     let presence = CallPresence()
     private var presenceSink: AnyCancellable?
+    private var wakeObserver: NSObjectProtocol?
     private var boundaryTimer: Timer?
     private var endCountdown: Task<Void, Never>?
     private var sessionStartedAt: Date?
@@ -154,6 +156,12 @@ final class AppModel: ObservableObject {
             Task { @MainActor in self?.checkCallBoundary() }
         }
         refreshDayCalendarIfStale()
+        // Cue stays running overnight; waking is when the new day's calendar should be fetched.
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.refreshDayCalendarIfStale() }
+        }
         wireSTT()
         refreshSessions()
         Task { @MainActor [weak self] in
@@ -829,6 +837,19 @@ final class AppModel: ObservableObject {
     var grokBotHookConfigured: Bool { GrokBotHook.isConfigured }
     var grokBotCalendarConfigured: Bool { GrokBotHook.isCalendarConfigured }
 
+    /// One line for the menu bar: what Cue is doing, or the next meeting on today's calendar.
+    var menuBarStatus: String {
+        switch phase {
+        case .listening:
+            return "Listening — \(sessionMeeting()?.title ?? "untitled call")"
+        case .error:
+            return "Stopped — open Cue to see why"
+        case .idle, .paused:
+            guard let next = DayCalendar.meetings().first(where: { $0.start > Date() }) else { return "Idle" }
+            return "Idle · next: \(next.start.formatted(date: .omitted, time: .shortened)) \(next.title)"
+        }
+    }
+
     func clearBriefPending() { briefPending = nil }
 
     /// Ask the Grok Bot automation for a pre-call brief. The bot writes it to
@@ -1471,7 +1492,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private static func answerLog(_ line: String) {
+    static func answerLog(_ line: String) {
         let stamped = "\(ISO8601DateFormatter().string(from: Date())) \(line)\n"
         guard let data = stamped.data(using: .utf8) else { return }
         let url = URL(fileURLWithPath: "/tmp/cue-answers.log")

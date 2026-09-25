@@ -34,6 +34,8 @@ First Listen: grant **Audio Capture / System Audio Recording** and **Microphone*
 
 Cmd+L starts/stops listening.
 
+Cue lives in the menu bar (waveform icon, red while listening). Closing the window leaves it running there with no Dock icon; the menu has Listen, Show Cue, Open at Login, and Quit. When a call starts, the window comes back without taking focus. Cue adds itself to login items on first launch (turn it off in the menu or System Settings → Login Items); login launches start in the menu bar only.
+
 Needs an **xAI API key** (console.x.ai). Resolution order:
 
 1. Settings field (saved to Keychain service `com.davidgeorgehope.cue`, account `xai`) — optional override

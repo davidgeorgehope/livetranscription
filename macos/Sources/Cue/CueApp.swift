@@ -1,4 +1,6 @@
 import AppKit
+import Combine
+import ServiceManagement
 import SwiftUI
 
 @available(macOS 14.2, *)
@@ -6,7 +8,8 @@ import SwiftUI
 enum CueMain {
     static func main() {
         let app = NSApplication.shared
-        app.setActivationPolicy(.regular)
+        // LSUIElement launches Cue as a menu bar app; the delegate makes it a
+        // regular app (Dock icon, menu bar) whenever the window is showing.
         // The UI hardcodes a dark palette; in system Light Mode the AppKit
         // split view paints white over it and the text becomes unreadable.
         app.appearance = NSAppearance(named: .darkAqua)
@@ -67,13 +70,15 @@ enum WindowPin {
 }
 
 @available(macOS 14.2, *)
-final class CueAppDelegate: NSObject, NSApplicationDelegate {
+final class CueAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var model: AppModel?
     private var window: NSWindow?
     private var listenTarget: CueListenTarget?
+    private var statusBar: StatusBarController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         FileHandle.standardError.write(Data("cue: didFinishLaunching\n".utf8))
+        let atLogin = Self.launchedAtLogin
         let window = NSWindow(
             contentRect: NSRect(x: 80, y: 80, width: 980, height: 680),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -82,11 +87,11 @@ final class CueAppDelegate: NSObject, NSApplicationDelegate {
         )
         window.title = "Cue"
         window.isReleasedWhenClosed = false
+        window.delegate = self
         WindowPin.apply(to: window, pinned: WindowPin.isPinned)
         window.center()
-        window.makeKeyAndOrderFront(nil)
         self.window = window
-        NSApp.activate(ignoringOtherApps: true)
+        if !atLogin { showWindow(activate: true) }
         FileHandle.standardError.write(Data("cue: bare window \(NSStringFromRect(window.frame))\n".utf8))
 
         DispatchQueue.main.async { [weak self] in
@@ -103,14 +108,120 @@ final class CueAppDelegate: NSObject, NSApplicationDelegate {
             if let listenItem = NSApp.mainMenu?.item(withTitle: "Controls")?.submenu?.item(withTitle: "Toggle Listen") {
                 listenItem.target = target
             }
-            window.makeKeyAndOrderFront(nil)
+            if !atLogin { window.makeKeyAndOrderFront(nil) }
+            self.statusBar = StatusBarController(model: model) { [weak self] activate in
+                self?.showWindow(activate: activate)
+            }
+            Self.openAtLoginOnce()
             FileHandle.standardError.write(Data("cue: hosted \(NSStringFromRect(window.frame))\n".utf8))
         }
     }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        window?.makeKeyAndOrderFront(nil)
+        showWindow(activate: true)
         return true
+    }
+
+    /// Closing the window leaves Cue running in the menu bar.
+    func windowWillClose(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+    }
+
+    /// `activate: false` puts the window up without taking focus from the meeting app.
+    func showWindow(activate: Bool) {
+        guard let window else { return }
+        NSApp.setActivationPolicy(.regular)
+        if activate {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+        } else if !window.isVisible {
+            window.orderFrontRegardless()
+        }
+    }
+
+    /// Login launches stay in the menu bar; the window opens on demand or when a call starts.
+    private static var launchedAtLogin: Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent,
+              event.eventID == kAEOpenApplication else { return false }
+        return event.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
+    }
+
+    /// Cue is meant to be always on, so it adds itself to login items once;
+    /// after that the menu toggle and System Settings own the choice.
+    @MainActor private static func openAtLoginOnce() {
+        let key = "cue.openAtLoginOffered"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        do {
+            try SMAppService.mainApp.register()
+            AppModel.answerLog("open at login: registered, status=\(SMAppService.mainApp.status.rawValue)")
+        } catch {
+            AppModel.answerLog("open at login failed: \(error.localizedDescription)")
+        }
+    }
+}
+
+/// The menu bar item: there whenever Cue runs, red while it's listening.
+@available(macOS 14.2, *)
+@MainActor
+final class StatusBarController: NSObject, NSMenuDelegate {
+    private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+    private let model: AppModel
+    private let showWindow: (_ activate: Bool) -> Void
+    private var phaseSink: AnyCancellable?
+
+    init(model: AppModel, showWindow: @escaping (_ activate: Bool) -> Void) {
+        self.model = model
+        self.showWindow = showWindow
+        super.init()
+        item.button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Cue")
+        let menu = NSMenu()
+        menu.delegate = self
+        item.menu = menu
+        phaseSink = model.$phase.sink { [weak self] phase in
+            guard let self else { return }
+            let listening = phase == .listening
+            self.item.button?.contentTintColor = listening ? .systemRed : nil
+            self.item.button?.toolTip = listening ? "Cue — listening" : "Cue"
+            // A call that starts while Cue is only in the menu bar still needs its cards on screen.
+            if listening { self.showWindow(false) }
+        }
+    }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let status = NSMenuItem(title: model.menuBarStatus, action: nil, keyEquivalent: "")
+        status.isEnabled = false
+        menu.addItem(status)
+        menu.addItem(.separator())
+        menu.addItem(action(model.phase == .listening ? "Stop Listening" : "Start Listening", #selector(toggleListen)))
+        menu.addItem(action("Show Cue", #selector(showCue)))
+        menu.addItem(.separator())
+        let login = action("Open at Login", #selector(toggleOpenAtLogin))
+        login.state = SMAppService.mainApp.status == .enabled ? .on : .off
+        menu.addItem(login)
+        menu.addItem(.separator())
+        menu.addItem(NSMenuItem(title: "Quit Cue", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+    }
+
+    private func action(_ title: String, _ selector: Selector) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: selector, keyEquivalent: "")
+        item.target = self
+        return item
+    }
+
+    @objc private func toggleListen() { model.toggleListen() }
+
+    @objc private func showCue() { showWindow(true) }
+
+    @objc private func toggleOpenAtLogin() {
+        let service = SMAppService.mainApp
+        do {
+            if service.status == .enabled { try service.unregister() } else { try service.register() }
+        } catch {
+            AppModel.answerLog("open at login toggle failed: \(error.localizedDescription)")
+        }
+        if service.status == .requiresApproval { SMAppService.openSystemSettingsLoginItems() }
     }
 }
 

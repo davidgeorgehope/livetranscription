@@ -41,6 +41,8 @@ cat > "$contents/Info.plist" <<'PLIST'
   <string>14.2</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.productivity</string>
+  <key>LSUIElement</key>
+  <true/>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSMicrophoneUsageDescription</key>
