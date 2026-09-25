@@ -7,9 +7,10 @@ import Foundation
 /// `PrepStore.inbox`, which `PrepInboxWatcher` picks up and attaches — so the
 /// request should go out minutes before the call, never at Listen.
 ///
-/// Two automations, from `.env` / environment:
+/// Three automations, from `.env` / environment:
 ///   GROK_BOT_HOOK_URL / GROK_BOT_HOOK_KEY — pre-call brief (writes into PREP)
 ///   GROK_BOT_SUM_URL  / GROK_BOT_SUM_KEY  — post-call summary and follow-ups
+///   GROK_BOT_CALENDAR_URL / GROK_BOT_CALENDAR_KEY — today's meetings (writes into `DayCalendar`)
 enum GrokBotHook {
     struct Config {
         let url: URL
@@ -18,6 +19,7 @@ enum GrokBotHook {
 
     static var config: Config? { config(url: "GROK_BOT_HOOK_URL", key: "GROK_BOT_HOOK_KEY") }
     static var wrapConfig: Config? { config(url: "GROK_BOT_SUM_URL", key: "GROK_BOT_SUM_KEY") }
+    static var calendarConfig: Config? { config(url: "GROK_BOT_CALENDAR_URL", key: "GROK_BOT_CALENDAR_KEY") }
 
     private static func config(url urlName: String, key keyName: String) -> Config? {
         func read(_ name: String) -> String? {
@@ -31,6 +33,7 @@ enum GrokBotHook {
 
     static var isConfigured: Bool { config != nil }
     static var isWrapConfigured: Bool { wrapConfig != nil }
+    static var isCalendarConfigured: Bool { calendarConfig != nil }
 
     struct Response: Decodable {
         let success: Bool
@@ -40,12 +43,12 @@ enum GrokBotHook {
     }
 
     /// - Parameter topic: who/what the call is about, in the user's words.
-    ///   Empty means "my next calendar meeting" — the bot has calendar access.
+    ///   Empty means the meeting in progress, else the next one — the bot has calendar access.
     static func requestBrief(topic: String) async throws -> Response {
         guard let config else { throw HookError.notConfigured }
         let topic = topic.trimmingCharacters(in: .whitespacesAndNewlines)
         let callLine = topic.isEmpty
-            ? "My next calendar meeting (starting within ~2 hours). Use the calendar to identify it."
+            ? "The calendar meeting I'm in right now; if none is in progress, my next one (starting within ~2 hours). Use the calendar to identify it."
             : topic
         let slug = (topic.isEmpty ? "next-meeting" : topic).lowercased()
             .replacingOccurrences(of: "[^a-z0-9]+", with: "-", options: .regularExpression)
@@ -56,6 +59,7 @@ enum GrokBotHook {
         Prepare a one-page pre-call brief for Cue, my live call copilot.
 
         CALL: \(callLine)
+        NOW: \(localISO(Date()))
 
         Search my threads, notes, and past conversations about this customer and these people. Write the brief as markdown. Start with a title line, then exactly these two lines from the calendar event (Cue uses them to know when the call ends):
         meeting_start: <ISO 8601 with offset, e.g. 2026-09-18T16:00:00-04:00>
@@ -80,6 +84,43 @@ enum GrokBotHook {
             "topic": topic.isEmpty ? "next meeting" : topic,
             "deliver_to": target,
         ])
+    }
+
+    /// Asks for the day's meetings as JSON at `DayCalendar.file(for:)`.
+    static func requestDay(_ day: Date = Date()) async throws -> Response {
+        guard let config = calendarConfig else { throw HookError.notConfigured }
+        let key = DayCalendar.dayKey(day)
+        let target = DayCalendar.file(for: day).path
+        let context = """
+        Read my calendar for Cue, my live call copilot. Cue uses it to tell which meeting I'm on and to split back-to-back meetings into separate transcripts.
+
+        DAY: \(day.formatted(date: .complete, time: .omitted)) (\(TimeZone.current.identifier))
+        NOW: \(localISO(Date()))
+
+        List every event that day that is a call or meeting with other people, including ones already over. Skip all-day events, focus or hold blocks, and events I declined.
+
+        Write only this JSON, no markdown fence, sorted by start, times in ISO 8601 with offset like NOW above:
+        {"date": "\(key)", "meetings": [{"title": "<event title>", "start": "<ISO 8601>", "end": "<ISO 8601>"}]}
+        With no meetings, write {"date": "\(key)", "meetings": []}.
+
+        DELIVERY: this path is on my Mac, not in your sandbox. Use your local computer tool to write it there, as UTF-8, creating the folder if needed and replacing the file if it exists:
+        \(target)
+
+        Do not post anywhere else.
+        """
+        return try await fire(config, body: [
+            "context": context,
+            "source": "cue",
+            "topic": "calendar \(key)",
+            "date": key,
+            "deliver_to": target,
+        ])
+    }
+
+    private static func localISO(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = .current
+        return formatter.string(from: date)
     }
 
     struct WrapPayload {
@@ -169,7 +210,7 @@ enum GrokBotHook {
         var errorDescription: String? {
             switch self {
             case .notConfigured:
-                return "Set the Grok Bot webhook URL and key in .env (GROK_BOT_HOOK_* for briefs, GROK_BOT_SUM_* for wraps)."
+                return "Set the Grok Bot webhook URL and key in .env (GROK_BOT_HOOK_* for briefs, GROK_BOT_SUM_* for wraps, GROK_BOT_CALENDAR_* for the day's calendar)."
             case let .rejected(status, detail):
                 return "Grok Bot webhook returned \(status)\(detail.isEmpty ? "" : ": \(detail)")"
             }

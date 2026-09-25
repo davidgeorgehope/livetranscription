@@ -37,6 +37,7 @@ final class AppModel: ObservableObject {
         case callMaybeOver(reason: String)
     }
     @Published private(set) var callHint: CallHint?
+    @Published var autoStartOnCallStart = true
     @Published var autoStopOnCallEnd = true
     @Published var sendWrapToGrokBot = true
     enum WrapSendState: Equatable {
@@ -55,8 +56,14 @@ final class AppModel: ObservableObject {
     private var dismissedStartHintFor: String?
     private var callSchedule: PrepStore.Schedule?
     private var lastWrapPayload: GrokBotHook.WrapPayload?
+    private var dayCalendarAskedAt: Date?
+    /// The calendar slot Cue last listened to or was told to skip; auto-start leaves it alone.
+    private var handledMeeting: PrepStore.Schedule?
+    private static let isReplayLaunch = !(ProcessInfo.processInfo.environment["CUE_REPLAY_FILE"] ?? "").isEmpty
     private static let micReleaseGrace: TimeInterval = 15
     private static let autoStopCountdown: TimeInterval = 30
+    /// A shorter drop than this is the app hiccupping, not leaving the meeting.
+    private static let minHopGap: TimeInterval = 5
     @Published var contextNotes = ""
     @Published var apiKeyField = ""
     @Published var coachingEnabled = true
@@ -115,6 +122,7 @@ final class AppModel: ObservableObject {
         sourceRoot = UserDefaults.standard.string(forKey: "cue.sourceRoot") ?? ""
         extraSourceRoots = UserDefaults.standard.string(forKey: "cue.extraSourceRoots") ?? ""
         saveTranscripts = UserDefaults.standard.object(forKey: "cue.saveTranscripts") as? Bool ?? true
+        autoStartOnCallStart = UserDefaults.standard.object(forKey: "cue.autoStartListen") as? Bool ?? true
         autoStopOnCallEnd = UserDefaults.standard.object(forKey: "cue.autoStop") as? Bool ?? true
         sendWrapToGrokBot = UserDefaults.standard.object(forKey: "cue.sendWrap") as? Bool ?? true
         if let raw = UserDefaults.standard.string(forKey: "cue.meetingType"),
@@ -145,6 +153,7 @@ final class AppModel: ObservableObject {
         boundaryTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.checkCallBoundary() }
         }
+        refreshDayCalendarIfStale()
         wireSTT()
         refreshSessions()
         Task { @MainActor [weak self] in
@@ -212,6 +221,7 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.set(sourceRoot, forKey: "cue.sourceRoot")
         UserDefaults.standard.set(extraSourceRoots, forKey: "cue.extraSourceRoots")
         UserDefaults.standard.set(saveTranscripts, forKey: "cue.saveTranscripts")
+        UserDefaults.standard.set(autoStartOnCallStart, forKey: "cue.autoStartListen")
         UserDefaults.standard.set(autoStopOnCallEnd, forKey: "cue.autoStop")
         UserDefaults.standard.set(sendWrapToGrokBot, forKey: "cue.sendWrap")
         UserDefaults.standard.set(meetingType.rawValue, forKey: "cue.meetingType")
@@ -229,6 +239,7 @@ final class AppModel: ObservableObject {
         guard phase != .listening else { return }
         livePartial = ""
         transcript = []
+        recentWindow = ""
         cues = []
         coaching = []
         commitments = []
@@ -274,6 +285,7 @@ final class AppModel: ObservableObject {
         livePartial = ""
         sttCommittedPrefix.removeAll()
         transcript = []
+        recentWindow = ""
         cues = []
         coaching = []
         commitments = []
@@ -290,6 +302,7 @@ final class AppModel: ObservableObject {
         sessionStartedAt = Date()
         lastLineAt = Date()
         callSchedule = PrepStore.currentSchedule()
+        refreshDayCalendarIfStale()
         autoRequestBrief()
         lastCallApp = presence.activeApp
         callAppSeenThisSession = presence.activeApp != nil
@@ -439,6 +452,7 @@ final class AppModel: ObservableObject {
         errorMessage = nil
         livePartial = ""
         transcript = []
+        recentWindow = ""
         cues = []
         coaching = []
         commitments = []
@@ -537,8 +551,9 @@ final class AppModel: ObservableObject {
         let startedAt = sessionStartedAt ?? Date()
         let endedAt = Date()
         let fullTranscript = transcript.map { "\($0.speaker.rawValue): \($0.text)" }.joined(separator: "\n")
-        let schedule = callSchedule
+        let schedule = sessionMeeting()
         let prepNames = prepDocs.map(\.name)
+        if !wasReplay, let schedule { handledMeeting = schedule }
         endCountdown?.cancel()
         endCountdown = nil
         callHint = nil
@@ -579,8 +594,10 @@ final class AppModel: ObservableObject {
         statusLine = "Writing call wrap…"
         Task {
             defer { wrapInFlight = false }
+            let title = storeName ?? "call"
+            var wrap: CallWrap?
             do {
-                let wrap = try await wrapEngine.wrap(
+                wrap = try await wrapEngine.wrap(
                     dialogue: dialogue,
                     commitments: captured,
                     notes: notes,
@@ -588,32 +605,41 @@ final class AppModel: ObservableObject {
                     meetingType: meetingType,
                     apiKey: key
                 )
-                let title = storeName ?? "call"
-                CallWrapEngine.write(wrap, beside: storeURL, title: title)
-                latestWrap = wrap
-                showWrapSheet = true
-                refreshSessions()
-                statusLine = "Wrap ready · \(storeURL.lastPathComponent)"
-                lastWrapPayload = GrokBotHook.WrapPayload(
-                    title: schedule?.title ?? prepNames.first ?? title,
-                    startedAt: startedAt,
-                    endedAt: endedAt,
-                    meetingType: meetingType.title,
-                    summary: wrap.summary,
-                    followUpDraft: wrap.followUpDraft,
-                    commitments: wrap.commitments.map { "[\($0.kind.rawValue)] \($0.speaker): \($0.text)" },
-                    prepDocs: prepNames,
-                    transcriptPath: storeURL.path,
-                    wrapPath: storeURL.deletingPathExtension().appendingPathExtension("wrap.md").path,
-                    transcript: fullTranscript
-                )
-                // Real calls only: a 30-second mic test shouldn't wake the bot.
-                let words = fullTranscript.split(separator: " ").count
-                if sendWrapToGrokBot, GrokBotHook.isWrapConfigured, !wasReplay, words >= 120 {
-                    sendWrapToBot()
-                }
             } catch {
                 statusLine = "Wrap failed: \(error.localizedDescription)"
+                Self.answerLog("wrap failed: \(error.localizedDescription)")
+            }
+            if let wrap {
+                CallWrapEngine.write(wrap, beside: storeURL, title: title)
+                // After a split the next call is already live; don't cover it with a sheet.
+                if phase != .listening {
+                    latestWrap = wrap
+                    showWrapSheet = true
+                }
+                refreshSessions()
+                statusLine = "Wrap ready · \(storeURL.lastPathComponent)"
+            }
+            // Grok Bot writes its own summary from the transcript file, so a
+            // failed first-pass wrap must not cost the hand-off.
+            lastWrapPayload = GrokBotHook.WrapPayload(
+                title: schedule?.title ?? prepNames.first ?? title,
+                startedAt: startedAt,
+                endedAt: endedAt,
+                meetingType: meetingType.title,
+                summary: wrap?.summary ?? "",
+                followUpDraft: wrap?.followUpDraft ?? "",
+                commitments: captured.map { "[\($0.kind.rawValue)] \($0.speaker): \($0.text)" },
+                prepDocs: prepNames,
+                transcriptPath: storeURL.path,
+                wrapPath: wrap == nil ? nil : storeURL.deletingPathExtension().appendingPathExtension("wrap.md").path,
+                transcript: fullTranscript
+            )
+            // Real calls only: a 30-second mic test shouldn't wake the bot.
+            let words = fullTranscript.split(separator: " ").count
+            if sendWrapToGrokBot, GrokBotHook.isWrapConfigured, !wasReplay, words >= 120 {
+                sendWrapToBot()
+            } else if !wasReplay {
+                Self.answerLog("wrap hand-off skipped: enabled=\(sendWrapToGrokBot) configured=\(GrokBotHook.isWrapConfigured) words=\(words)")
             }
         }
     }
@@ -628,12 +654,14 @@ final class AppModel: ObservableObject {
         wrapSend = .sending
         Task {
             do {
-                _ = try await GrokBotHook.sendWrap(payload)
+                let response = try await GrokBotHook.sendWrap(payload)
                 wrapSend = .sent
                 statusLine = "Grok Bot has the call — summary and follow-ups on the way"
+                Self.answerLog("wrap hand-off sent run=\(response.runUuid ?? "?") title=\(payload.title)")
             } catch {
                 wrapSend = .failed(error.localizedDescription)
                 statusLine = "Grok Bot hand-off failed: \(error.localizedDescription)"
+                Self.answerLog("wrap hand-off failed: \(error.localizedDescription)")
             }
         }
     }
@@ -642,17 +670,25 @@ final class AppModel: ObservableObject {
         Self.answerLog("presence app=\(app ?? "none") phase=\(phase.rawValue)")
         if phase == .listening {
             if let app {
+                let hopped = micReleasedAt.map { Date().timeIntervalSince($0) >= Self.minHopGap } ?? false
                 lastCallApp = app
                 callAppSeenThisSession = true
                 micReleasedAt = nil
-                // They rejoined (or the app hiccupped): stand down.
-                if case .callEnding = callHint { keepListening() }
+                if hopped, replayTask == nil, let meeting = sessionMeeting(),
+                   DayCalendar.isNextCall(at: Date(), after: meeting, in: DayCalendar.meetings()) {
+                    splitForNextCall(app: app, after: meeting)
+                    return
+                }
+                // They rejoined (or the app hiccupped): stand down without
+                // disarming the mic rule, so the real end of this call still stops it.
+                if case .callEnding = callHint { cancelEndCountdown() }
             } else if callAppSeenThisSession, micReleasedAt == nil {
                 micReleasedAt = Date()
             }
             return
         }
         if let app {
+            refreshDayCalendarIfStale()
             if app != dismissedStartHintFor, replayTask == nil {
                 callHint = .callStarted(app: app)
             }
@@ -663,7 +699,11 @@ final class AppModel: ObservableObject {
     }
 
     private func checkCallBoundary() {
-        guard phase == .listening, replayTask == nil else { return }
+        guard replayTask == nil else { return }
+        guard phase == .listening else {
+            autoStartIfScheduled()
+            return
+        }
         if case .callEnding = callHint { return }
         let now = Date()
         let quietFor = now.timeIntervalSince(lastLineAt)
@@ -672,15 +712,45 @@ final class AppModel: ObservableObject {
             beginEndCountdown(reason: "\(lastCallApp ?? "The meeting app") let go of the mic")
             return
         }
-        if let schedule = callSchedule, now > schedule.end.addingTimeInterval(60), quietFor >= 90 {
+        let meeting = sessionMeeting()
+        if let meeting, now > meeting.end.addingTimeInterval(60), quietFor >= 90 {
             beginEndCountdown(reason: "Past the scheduled end and nobody has spoken for 90s")
             return
         }
         // No app signal, no schedule: only suggest — a long pause is not proof.
-        if !callAppSeenThisSession, callSchedule == nil, !transcript.isEmpty, quietFor >= 300,
+        if !callAppSeenThisSession, meeting == nil, !transcript.isEmpty, quietFor >= 300,
            callHint == nil {
             callHint = .callMaybeOver(reason: "Nothing heard for 5 minutes")
         }
+    }
+
+    /// The meeting this session is for: today's calendar entry when Listen
+    /// started, else the window the attached brief states.
+    private func sessionMeeting() -> PrepStore.Schedule? {
+        DayCalendar.meeting(at: sessionStartedAt ?? Date(), in: DayCalendar.meetings()) ?? callSchedule
+    }
+
+    /// Back-to-back calls: close this one the way Stop does (transcript, wrap,
+    /// Grok Bot hand-off) and start the next without waiting for a countdown.
+    private func splitForNextCall(app: String, after meeting: PrepStore.Schedule) {
+        Self.answerLog("call split: \(app) took the mic back after \(meeting.title)")
+        stop()
+        start()
+        // This runs inside the presence publisher's willSet, where
+        // `presence.activeApp` still reads nil, so start() left the mic rule disarmed.
+        lastCallApp = app
+        callAppSeenThisSession = true
+    }
+
+    /// Starts Listen when a meeting app holds the mic during a calendar meeting
+    /// Cue hasn't handled; calls that aren't on the calendar only get the banner.
+    private func autoStartIfScheduled() {
+        guard autoStartOnCallStart, phase == .idle, !Self.isReplayLaunch,
+              let app = presence.activeApp,
+              let meeting = DayCalendar.autoStartMeeting(at: Date(), in: DayCalendar.meetings(), skipping: handledMeeting)
+        else { return }
+        Self.answerLog("auto-start: \(app) has the mic during \(meeting.title)")
+        start()
     }
 
     private func beginEndCountdown(reason: String) {
@@ -700,19 +770,27 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// User overrode an end-of-call hint: cancel the countdown and re-arm the
-    /// mic rule only if the meeting app picks the mic up again.
+    /// User overrode an end-of-call hint: cancel the countdown. If the meeting
+    /// app has let go, the mic rule re-arms when it picks the mic up again.
     func keepListening() {
+        cancelEndCountdown()
+        callAppSeenThisSession = presence.activeApp != nil
+        lastLineAt = Date()
+    }
+
+    private func cancelEndCountdown() {
         endCountdown?.cancel()
         endCountdown = nil
         callHint = nil
         micReleasedAt = nil
-        callAppSeenThisSession = false
-        lastLineAt = Date()
     }
 
     func dismissCallHint() {
-        if case .callStarted(let app) = callHint { dismissedStartHintFor = app }
+        if case .callStarted(let app) = callHint {
+            dismissedStartHintFor = app
+            // Not now also keeps auto-start off the meeting that's on.
+            if let meeting = DayCalendar.meeting(at: Date(), in: DayCalendar.meetings()) { handledMeeting = meeting }
+        }
         callHint = nil
     }
 
@@ -741,12 +819,15 @@ final class AppModel: ObservableObject {
         guard !swept.isEmpty else { return }
         prepDocs = PrepStore.currentDocs()
         briefPending = nil
+        // The Listen-time brief lands mid-call; its meeting times are the fallback schedule.
+        if phase == .listening { callSchedule = PrepStore.currentSchedule() }
         statusLine = swept.count == 1
             ? "Prep arrived: \(swept[0].name)"
             : "Attached \(swept.count) prep docs from inbox"
     }
 
     var grokBotHookConfigured: Bool { GrokBotHook.isConfigured }
+    var grokBotCalendarConfigured: Bool { GrokBotHook.isCalendarConfigured }
 
     func clearBriefPending() { briefPending = nil }
 
@@ -764,6 +845,7 @@ final class AppModel: ObservableObject {
             do {
                 _ = try await GrokBotHook.requestBrief(topic: topic)
                 briefPending = topic.isEmpty ? "next meeting" : topic
+                Self.answerLog("brief requested (quiet=\(quiet)) topic=\(briefPending ?? "")")
                 if !quiet { statusLine = "Grok Bot is preparing a brief — it lands in PREP when ready" }
             } catch {
                 Self.answerLog("brief request failed (quiet=\(quiet)): \(error.localizedDescription)")
@@ -772,16 +854,41 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Listen always asks the bot for a brief, unless one is already on its
-    /// way or landed recently — asking twice just yields the same doc twice.
+    /// Listen always asks the bot for a brief on the meeting the calendar says
+    /// this is, unless that one is already on its way or a brief landed
+    /// recently — asking twice just yields the same doc twice.
     private func autoRequestBrief() {
-        guard GrokBotHook.isConfigured, briefPending == nil else { return }
+        guard GrokBotHook.isConfigured else { return }
+        let topic = DayCalendar.meeting(at: Date(), in: DayCalendar.meetings()).map(Self.briefTopic) ?? ""
+        guard briefPending != (topic.isEmpty ? "next meeting" : topic) else { return }
         let recent = PrepStore.currentDocs().contains { doc in
             let modified = (try? doc.url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
             return modified.map { Date().timeIntervalSince($0) < 30 * 60 } ?? false
         }
         guard !recent else { return }
-        requestBrief(topic: "", quiet: true)
+        requestBrief(topic: topic, quiet: true)
+    }
+
+    private static func briefTopic(_ meeting: PrepStore.Schedule) -> String {
+        let start = meeting.start.formatted(date: .abbreviated, time: .shortened)
+        let end = meeting.end.formatted(date: .omitted, time: .shortened)
+        return "\(meeting.title), \(start)–\(end)"
+    }
+
+    /// Asked at launch, at Listen, and when a meeting app takes the mic. The
+    /// bot takes minutes and nothing waits on it: boundaries read the file fresh.
+    private func refreshDayCalendarIfStale() {
+        guard GrokBotHook.isCalendarConfigured, !Self.isReplayLaunch, DayCalendar.isStale() else { return }
+        if let asked = dayCalendarAskedAt, Date().timeIntervalSince(asked) < 20 * 60 { return }
+        dayCalendarAskedAt = Date()
+        Task {
+            do {
+                let response = try await GrokBotHook.requestDay()
+                Self.answerLog("calendar requested run=\(response.runUuid ?? "?")")
+            } catch {
+                Self.answerLog("calendar request failed: \(error.localizedDescription)")
+            }
+        }
     }
 
     func dismiss(_ card: AnswerCard) {
